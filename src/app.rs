@@ -98,6 +98,9 @@ pub struct BibleDeskApp {
     // Static data
     translations: Vec<Translation>,
     books: Vec<BibleBook>,
+
+    // Verse marks: (book_name, chapter, verse, translation) → color name
+    verse_marks: std::collections::HashMap<(String, u32, u32, String), String>,
 }
 
 impl BibleDeskApp {
@@ -145,6 +148,13 @@ impl BibleDeskApp {
         let saved_verses = db.lock().unwrap().get_saved_verses().unwrap_or_default();
         let reading_plans = db.lock().unwrap().get_reading_plans().unwrap_or_default();
         let memory_cards = db.lock().unwrap().get_memory_cards().unwrap_or_default();
+        let verse_marks: std::collections::HashMap<(String, u32, u32, String), String> = db
+            .lock().unwrap()
+            .get_verse_marks()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(bn, ch, v, tr, col)| ((bn, ch, v, tr), col))
+            .collect();
 
         // Start background catalog fetch if cache is empty
         let (catalog_loading, catalog_receiver) = if needs_catalog {
@@ -211,6 +221,7 @@ impl BibleDeskApp {
             settings_dark_temp: settings_dark,
             translations,
             books,
+            verse_marks,
         }
     }
 
@@ -423,6 +434,26 @@ impl BibleDeskApp {
     fn reload_cards(&mut self) {
         self.memory_cards = self.db.lock().unwrap().get_memory_cards().unwrap_or_default();
     }
+
+    fn reload_marks(&mut self) {
+        self.verse_marks = self.db.lock().unwrap()
+            .get_verse_marks()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(bn, ch, v, tr, col)| ((bn, ch, v, tr), col))
+            .collect();
+    }
+
+    /// Convert a stored color name to an egui Color32.
+    fn mark_color(name: &str) -> Color32 {
+        match name {
+            "yellow" => Color32::from_rgb(255, 230,  60),
+            "green"  => Color32::from_rgb( 80, 200, 100),
+            "blue"   => Color32::from_rgb( 80, 150, 255),
+            "pink"   => Color32::from_rgb(255, 130, 180),
+            _        => Color32::TRANSPARENT,
+        }
+    }
 }
 
 fn app_db_path() -> std::path::PathBuf {
@@ -629,15 +660,32 @@ impl BibleDeskApp {
             let mut save_verse: Option<Verse> = None;
             let mut unsave_verse_id: Option<i64> = None;
             let mut add_flashcard: Option<Verse> = None;
+            let mut set_mark: Option<(Verse, &'static str)> = None;  // (verse, color_name)
+            let mut clear_mark: Option<Verse> = None;
 
-            // Build a fast lookup: (book_name, chapter, verse, translation) → saved_verse id
+            // Fast lookups
             let saved_map: std::collections::HashMap<(String, u32, u32, String), i64> = self
                 .saved_verses
                 .iter()
                 .map(|sv| ((sv.book_name.clone(), sv.chapter, sv.verse, sv.translation.clone()), sv.id))
                 .collect();
 
+            // Localized strings captured before closure (avoids borrow conflict)
+            let lbl_save      = self.locale.t("reader.verse_context_save");
+            let lbl_unsave    = self.locale.t("reader.verse_context_unsave");
+            let lbl_flash     = self.locale.t("reader.verse_context_flashcard");
+            let lbl_mark      = self.locale.t("reader.mark");
+            let lbl_yellow    = self.locale.t("reader.mark_yellow");
+            let lbl_green     = self.locale.t("reader.mark_green");
+            let lbl_blue      = self.locale.t("reader.mark_blue");
+            let lbl_pink      = self.locale.t("reader.mark_pink");
+            let lbl_clr       = self.locale.t("reader.clear_mark");
+            let marks         = &self.verse_marks;
+
             ScrollArea::vertical().id_salt("reader_scroll").show(ui, |ui| {
+                // Ensure text wraps to available width
+                ui.set_max_width(ui.available_width());
+
                 for verse in &chapter.verses {
                     let key = (
                         verse.book_name.clone(),
@@ -645,35 +693,21 @@ impl BibleDeskApp {
                         verse.verse,
                         verse.translation.clone(),
                     );
-                    let saved_id = saved_map.get(&key).copied();
+                    let saved_id  = saved_map.get(&key).copied();
+                    let mark_col  = marks.get(&key).map(|c| BibleDeskApp::mark_color(c));
+                    let is_marked = mark_col.is_some();
 
+                    // ── Verse number row (short, left-aligned) ───────────────
                     ui.horizontal(|ui| {
+                        // Colored mark dot
+                        if let Some(col) = mark_col {
+                            ui.label(RichText::new("●").color(col));
+                        }
                         ui.label(
                             RichText::new(format!("{}.", verse.verse))
                                 .strong()
                                 .color(Color32::from_rgb(150, 180, 255)),
                         );
-                        // Verse text with right-click context menu
-                        let resp = ui.label(&verse.text);
-                        resp.context_menu(|ui| {
-                            if saved_id.is_some() {
-                                if ui.button(self.locale.t("reader.verse_context_unsave")).clicked() {
-                                    unsave_verse_id = saved_id;
-                                    ui.close_menu();
-                                }
-                            } else {
-                                if ui.button(self.locale.t("reader.verse_context_save")).clicked() {
-                                    save_verse = Some(verse.clone());
-                                    ui.close_menu();
-                                }
-                            }
-                            if ui.button(self.locale.t("reader.verse_context_flashcard")).clicked() {
-                                add_flashcard = Some(verse.clone());
-                                ui.close_menu();
-                            }
-                        });
-
-                        // Inline saved indicator
                         if saved_id.is_some() {
                             ui.label(
                                 RichText::new("✓")
@@ -682,7 +716,43 @@ impl BibleDeskApp {
                             );
                         }
                     });
-                    ui.add_space(4.0);
+
+                    // ── Verse text — full width, wrapping ───────────────────
+                    let text_resp = ui.add(
+                        egui::Label::new(&verse.text)
+                            .wrap()
+                    );
+                    text_resp.context_menu(|ui| {
+                        // Save / Unsave
+                        if saved_id.is_some() {
+                            if ui.button(lbl_unsave).clicked() {
+                                unsave_verse_id = saved_id;
+                                ui.close_menu();
+                            }
+                        } else if ui.button(lbl_save).clicked() {
+                            save_verse = Some(verse.clone());
+                            ui.close_menu();
+                        }
+                        // Flashcard
+                        if ui.button(lbl_flash).clicked() {
+                            add_flashcard = Some(verse.clone());
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        // Mark submenu
+                        ui.menu_button(lbl_mark, |ui| {
+                            if ui.button(lbl_yellow).clicked() { set_mark = Some((verse.clone(), "yellow")); ui.close_menu(); }
+                            if ui.button(lbl_green).clicked()  { set_mark = Some((verse.clone(), "green"));  ui.close_menu(); }
+                            if ui.button(lbl_blue).clicked()   { set_mark = Some((verse.clone(), "blue"));   ui.close_menu(); }
+                            if ui.button(lbl_pink).clicked()   { set_mark = Some((verse.clone(), "pink"));   ui.close_menu(); }
+                        });
+                        if is_marked && ui.button(lbl_clr).clicked() {
+                            clear_mark = Some(verse.clone());
+                            ui.close_menu();
+                        }
+                    });
+
+                    ui.add_space(6.0);
                 }
             });
 
@@ -698,6 +768,18 @@ impl BibleDeskApp {
             if let Some(v) = add_flashcard {
                 let _ = self.db.lock().unwrap().add_memory_card(&v);
                 self.reload_cards();
+            }
+            if let Some((v, color)) = set_mark {
+                let _ = self.db.lock().unwrap().set_verse_mark(
+                    &v.book_name, v.chapter, v.verse, &v.translation, color,
+                );
+                self.reload_marks();
+            }
+            if let Some(v) = clear_mark {
+                let _ = self.db.lock().unwrap().clear_verse_mark(
+                    &v.book_name, v.chapter, v.verse, &v.translation,
+                );
+                self.reload_marks();
             }
         } else if self.chapter_loading {
             ui.centered_and_justified(|ui| { ui.spinner(); });
@@ -1028,6 +1110,14 @@ impl BibleDeskApp {
             for sv in &filtered {
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
+                        // Mark color dot (if this verse is marked)
+                        let mark_key = (sv.book_name.clone(), sv.chapter, sv.verse, sv.translation.clone());
+                        if let Some(color_name) = self.verse_marks.get(&mark_key) {
+                            ui.label(
+                                RichText::new("●")
+                                    .color(BibleDeskApp::mark_color(color_name))
+                            );
+                        }
                         ui.label(
                             RichText::new(format!("{} {}:{}", sv.book_name, sv.chapter, sv.verse))
                                 .strong(),
@@ -1044,7 +1134,7 @@ impl BibleDeskApp {
                             to_add_card = Some(sv.clone());
                         }
                     });
-                    ui.label(&sv.text);
+                    ui.add(egui::Label::new(&sv.text).wrap());
 
                     if self.editing_note_id == Some(sv.id) {
                         ui.horizontal(|ui| {

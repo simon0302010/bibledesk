@@ -96,6 +96,15 @@ impl Database {
                 UNIQUE(translation, book_nr)
             );
             CREATE INDEX IF NOT EXISTS idx_cached_books_trans ON cached_books(translation);
+
+            CREATE TABLE IF NOT EXISTS verse_marks (
+                book_name TEXT NOT NULL,
+                chapter INTEGER NOT NULL,
+                verse INTEGER NOT NULL,
+                translation TEXT NOT NULL,
+                color TEXT NOT NULL,
+                PRIMARY KEY (book_name, chapter, verse, translation)
+            );
         ")?;
         Ok(())
     }
@@ -402,6 +411,54 @@ impl Database {
                 name: row.get(1)?,
                 chapters: row.get(2)?,
             })
+        })?.collect::<Result<Vec<_>>>()?;
+        Ok(result)
+    }
+
+    // Verse marks (highlight colors)
+    pub fn set_verse_mark(
+        &self,
+        book_name: &str,
+        chapter: u32,
+        verse: u32,
+        translation: &str,
+        color: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO verse_marks (book_name, chapter, verse, translation, color)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![book_name, chapter, verse, translation, color],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_verse_mark(
+        &self,
+        book_name: &str,
+        chapter: u32,
+        verse: u32,
+        translation: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM verse_marks WHERE book_name=?1 AND chapter=?2 AND verse=?3 AND translation=?4",
+            params![book_name, chapter, verse, translation],
+        )?;
+        Ok(())
+    }
+
+    /// Returns all marks as (book_name, chapter, verse, translation, color).
+    pub fn get_verse_marks(&self) -> Result<Vec<(String, u32, u32, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT book_name, chapter, verse, translation, color FROM verse_marks"
+        )?;
+        let result = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, u32>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
         })?.collect::<Result<Vec<_>>>()?;
         Ok(result)
     }
