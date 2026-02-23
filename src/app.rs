@@ -794,6 +794,10 @@ impl BibleDeskApp {
             let word_marks    = &self.word_marks;
             let active_color  = self.active_marker_color;
             let drag_active   = self.marker_drag_active;
+            // Raw pointer position — used for rect-based drag hit-testing.
+            // resp.hovered() fails during drags because egui captures the pointer
+            // to the widget where the drag started; hover_pos() is always available.
+            let pointer_pos   = ctx.input(|i| i.pointer.hover_pos());
 
             ScrollArea::vertical().id_salt("reader_scroll").show(ui, |ui| {
                 ui.set_max_width(ui.available_width());
@@ -895,9 +899,16 @@ impl BibleDeskApp {
                                 start_drag = true;
                             }
 
-                            // Apply mark on click OR when hovered while dragging with mouse held
+                            // Apply mark on click OR when pointer is physically over this word
+                            // while the mouse button is held (drag).  We use resp.rect +
+                            // raw hover_pos() instead of resp.hovered() because egui captures
+                            // the pointer to the first dragged widget, making hovered() return
+                            // false for all subsequent words in the drag path.
+                            let pointer_over = pointer_pos
+                                .map(|p| resp.rect.contains(p))
+                                .unwrap_or(false);
                             let should_apply = resp.clicked()
-                                || (resp.hovered() && mouse_down && (drag_active || start_drag) && active_color.is_some());
+                                || (pointer_over && mouse_down && (drag_active || start_drag) && active_color.is_some());
 
                             if should_apply {
                                 if let Some(color) = active_color {
