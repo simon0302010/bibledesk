@@ -4,11 +4,11 @@ use std::thread;
 
 use eframe::egui::{self, RichText, Color32, ScrollArea, TextEdit, Ui};
 
-use crate::api::BibleApiClient;
+use crate::api::BibleClient;
 use crate::db::Database;
 use crate::localization::{Language, Locale};
 use crate::models::{
-    bible_books, BibleBook, Chapter, MemoryCard, ReadingPlan, ReadingPlanEntry,
+    BibleBook, Chapter, MemoryCard, ReadingPlan, ReadingPlanEntry,
     SavedVerse, Translation, Verse,
 };
 use crate::settings::Settings;
@@ -43,6 +43,10 @@ pub struct BibleDeskApp {
 
     // Navigation
     current_tab: Tab,
+
+    // Catalog loading (translations + books fetched from API)
+    catalog_loading: bool,
+    catalog_receiver: Option<Receiver<Result<(Vec<Translation>, Vec<BibleBook>), String>>>,
 
     // Reader state
     selected_book_idx: usize,
@@ -122,8 +126,11 @@ impl BibleDeskApp {
         }
 
         let locale = Locale::new(settings.language.clone());
-        let translations = Translation::all();
-        let books = bible_books();
+
+        // Load catalog from cache; fetch from API if missing
+        let translations = db.get_cached_translations().unwrap_or_default();
+        let books = db.get_cached_books(&settings.default_translation).unwrap_or_default();
+        let needs_catalog = translations.is_empty() || books.is_empty();
 
         let settings_lang = settings.language.clone();
         let settings_dark = settings.dark_mode;
@@ -135,11 +142,35 @@ impl BibleDeskApp {
         let reading_plans = db.lock().unwrap().get_reading_plans().unwrap_or_default();
         let memory_cards = db.lock().unwrap().get_memory_cards().unwrap_or_default();
 
+        // Start background catalog fetch if cache is empty
+        let (catalog_loading, catalog_receiver) = if needs_catalog {
+            let (tx, rx) = mpsc::channel();
+            let default_trans = settings.default_translation.clone();
+            let db_clone = db.clone();
+            thread::spawn(move || {
+                let result: Result<(Vec<Translation>, Vec<BibleBook>), String> = (|| {
+                    let trans = BibleClient::fetch_translations()?;
+                    let books = BibleClient::fetch_books(&default_trans)?;
+                    if let Ok(db) = db_clone.lock() {
+                        let _ = db.cache_translations(&trans);
+                        let _ = db.cache_books(&default_trans, &books);
+                    }
+                    Ok((trans, books))
+                })();
+                let _ = tx.send(result);
+            });
+            (true, Some(rx))
+        } else {
+            (false, None)
+        };
+
         BibleDeskApp {
             db,
             settings,
             locale,
             current_tab: Tab::Reader,
+            catalog_loading,
+            catalog_receiver,
             selected_book_idx: 0,
             selected_chapter: 1,
             current_chapter: None,
@@ -176,11 +207,75 @@ impl BibleDeskApp {
         }
     }
 
-    fn load_chapter(&mut self) {
-        if self.chapter_loading {
+    fn load_books_for_current_translation(&mut self) {
+        let trans = self.settings.default_translation.clone();
+        // Serve from DB cache if available
+        if let Ok(books) = self.db.lock().unwrap().get_cached_books(&trans) {
+            if !books.is_empty() {
+                self.books = books;
+                self.selected_book_idx = 0;
+                self.selected_chapter = 1;
+                return;
+            }
+        }
+        // Avoid duplicate in-flight fetches
+        if self.catalog_receiver.is_some() {
             return;
         }
-        let book_name = self.books[self.selected_book_idx].name.to_string();
+        self.catalog_loading = true;
+        let (tx, rx) = mpsc::channel();
+        self.catalog_receiver = Some(rx);
+        let db_clone = self.db.clone();
+        thread::spawn(move || {
+            let result: Result<(Vec<Translation>, Vec<BibleBook>), String> =
+                BibleClient::fetch_books(&trans).map(|books| {
+                    if let Ok(db) = db_clone.lock() {
+                        let _ = db.cache_books(&trans, &books);
+                    }
+                    // Empty translations vector signals "books-only refresh"
+                    (Vec::new(), books)
+                });
+            let _ = tx.send(result);
+        });
+    }
+
+    fn poll_catalog_load(&mut self) {
+        let received = self.catalog_receiver.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(result) = received {
+            self.catalog_loading = false;
+            self.catalog_receiver = None;
+            match result {
+                Ok((translations, books)) => {
+                    if !translations.is_empty() {
+                        self.translations = translations;
+                        // Keep default translation valid
+                        if !self.translations.iter().any(|t| t.id == self.settings.default_translation) {
+                            if let Some(first) = self.translations.first() {
+                                self.settings.default_translation = first.id.clone();
+                                self.settings_translation_temp = first.id.clone();
+                            }
+                        }
+                    }
+                    if !books.is_empty() {
+                        self.books = books;
+                        self.selected_book_idx = 0;
+                        self.selected_chapter = 1;
+                    }
+                }
+                Err(e) => {
+                    self.reader_status = format!("Catalog error: {}", e);
+                }
+            }
+        }
+    }
+
+    fn load_chapter(&mut self) {
+        if self.chapter_loading || self.books.is_empty() {
+            return;
+        }
+        let book = &self.books[self.selected_book_idx];
+        let book_nr = book.book_nr;
+        let book_name = book.name.clone();
         let chapter = self.selected_chapter;
         let translation = self.settings.default_translation.clone();
 
@@ -210,7 +305,7 @@ impl BibleDeskApp {
 
         let db = self.db.clone();
         thread::spawn(move || {
-            let result = BibleApiClient::fetch_chapter(&book_name, chapter, &translation);
+            let result = BibleClient::fetch_chapter(&translation, book_nr, chapter);
             if let Ok(ref chap) = result {
                 if let Ok(db) = db.lock() {
                     let _ = db.cache_verses(&chap.verses);
@@ -281,7 +376,8 @@ fn app_db_path() -> std::path::PathBuf {
 impl eframe::App for BibleDeskApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_chapter_load();
-        if self.chapter_loading {
+        self.poll_catalog_load();
+        if self.chapter_loading || self.catalog_loading {
             ctx.request_repaint();
         }
 
@@ -332,19 +428,37 @@ impl eframe::App for BibleDeskApp {
 
 impl BibleDeskApp {
     fn show_reader(&mut self, ui: &mut Ui, _ctx: &egui::Context) {
+        // While catalog is loading and no books are available yet, show a spinner
+        if self.books.is_empty() {
+            ui.centered_and_justified(|ui| {
+                if self.catalog_loading {
+                    ui.spinner();
+                    ui.label("Loading Bible catalog from API...");
+                } else {
+                    ui.label("Book list unavailable. Check your internet connection and restart.");
+                }
+            });
+            return;
+        }
+
         // Controls row
+        let selected_book_name = self.books[self.selected_book_idx].name.clone();
+        let max_chapters = self.books[self.selected_book_idx].chapters;
+
+        // Detect translation change so we can reload books
+        let mut new_translation: Option<String> = None;
+
         ui.horizontal(|ui| {
             egui::ComboBox::from_label(self.locale.t("reader.select_book"))
-                .selected_text(self.books[self.selected_book_idx].name)
+                .selected_text(&selected_book_name)
                 .show_ui(ui, |ui| {
                     for i in 0..self.books.len() {
-                        let name = self.books[i].name;
+                        let name = self.books[i].name.clone();
                         ui.selectable_value(&mut self.selected_book_idx, i, name);
                     }
                 });
 
             ui.label(self.locale.t("reader.chapter"));
-            let max_chapters = self.books[self.selected_book_idx].chapters;
             egui::ComboBox::from_id_salt("chapter_sel")
                 .selected_text(self.selected_chapter.to_string())
                 .show_ui(ui, |ui| {
@@ -366,8 +480,7 @@ impl BibleDeskApp {
                         let name = self.translations[i].name.clone();
                         let sel  = self.settings.default_translation == id;
                         if ui.selectable_label(sel, &name).clicked() {
-                            self.settings.default_translation = id;
-                            self.current_chapter = None;
+                            new_translation = Some(id);
                         }
                     }
                 });
@@ -382,10 +495,17 @@ impl BibleDeskApp {
             }
         });
 
+        // Apply translation change after the closure
+        if let Some(id) = new_translation {
+            self.settings.default_translation = id;
+            self.current_chapter = None;
+            self.load_books_for_current_translation();
+        }
+
         // Prev / Next navigation
         ui.horizontal(|ui| {
             let can_prev = self.selected_chapter > 1;
-            let can_next = self.selected_chapter < self.books[self.selected_book_idx].chapters;
+            let can_next = self.selected_chapter < max_chapters;
             if ui.add_enabled(can_prev, egui::Button::new(self.locale.t("reader.previous"))).clicked() {
                 self.selected_chapter -= 1;
                 self.load_chapter();
@@ -615,34 +735,38 @@ impl BibleDeskApp {
             if let Some(plan_id) = selected_pid {
                 // Add-entry form
                 cols[1].group(|ui| {
-                    ui.label(locale_add_chap);
-                    ui.horizontal(|ui| {
-                        ui.label(locale_book);
-                        egui::ComboBox::from_id_salt("plan_book_sel")
-                            .selected_text(books[plan_entry_book].name)
-                            .show_ui(ui, |ui| {
-                                for (i, book) in books.iter().enumerate() {
-                                    ui.selectable_value(&mut plan_entry_book, i, book.name);
-                                }
-                            });
-                        ui.label(locale_chap);
-                        ui.text_edit_singleline(&mut plan_entry_chap);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(locale_date);
-                        ui.text_edit_singleline(&mut plan_entry_date);
-                    });
-                    // Use `ui` (not `cols[1]`) inside the group closure
-                    if ui.button(locale_add).clicked() {
-                        let chapter: u32 = plan_entry_chap.parse().unwrap_or(1);
-                        let book_name    = books[plan_entry_book].name.to_string();
-                        let date         = if plan_entry_date.is_empty() {
-                            None
-                        } else {
-                            Some(plan_entry_date.clone())
-                        };
-                        action.add_entry = Some((plan_id, book_name, chapter, date));
-                        action.reload_entries = true;
+                    if books.is_empty() {
+                        ui.label("Book list loading...");
+                    } else {
+                        ui.label(locale_add_chap);
+                        ui.horizontal(|ui| {
+                            ui.label(locale_book);
+                            let book_label = books[plan_entry_book.min(books.len().saturating_sub(1))].name.clone();
+                            egui::ComboBox::from_id_salt("plan_book_sel")
+                                .selected_text(book_label)
+                                .show_ui(ui, |ui| {
+                                    for (i, book) in books.iter().enumerate() {
+                                        ui.selectable_value(&mut plan_entry_book, i, book.name.clone());
+                                    }
+                                });
+                            ui.label(locale_chap);
+                            ui.text_edit_singleline(&mut plan_entry_chap);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(locale_date);
+                            ui.text_edit_singleline(&mut plan_entry_date);
+                        });
+                        if ui.button(locale_add).clicked() && !books.is_empty() {
+                            let chapter: u32 = plan_entry_chap.parse().unwrap_or(1);
+                            let book_name    = books[plan_entry_book.min(books.len() - 1)].name.clone();
+                            let date         = if plan_entry_date.is_empty() {
+                                None
+                            } else {
+                                Some(plan_entry_date.clone())
+                            };
+                            action.add_entry = Some((plan_id, book_name, chapter, date));
+                            action.reload_entries = true;
+                        }
                     }
                 });
 

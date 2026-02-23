@@ -1,5 +1,5 @@
 use rusqlite::{Connection, Result, params};
-use crate::models::{Verse, SavedVerse, ReadingPlan, ReadingPlanEntry, MemoryCard};
+use crate::models::{Verse, SavedVerse, ReadingPlan, ReadingPlanEntry, MemoryCard, Translation, BibleBook};
 use chrono::Local;
 
 pub struct Database {
@@ -79,6 +79,21 @@ impl Database {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS cached_translations (
+                abbreviation TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS cached_books (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                translation TEXT NOT NULL,
+                book_nr INTEGER NOT NULL,
+                book_name TEXT NOT NULL,
+                chapter_count INTEGER NOT NULL,
+                UNIQUE(translation, book_nr)
+            );
+            CREATE INDEX IF NOT EXISTS idx_cached_books_trans ON cached_books(translation);
         ")?;
         Ok(())
     }
@@ -337,5 +352,55 @@ impl Database {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    // Catalog caching — translations
+    pub fn cache_translations(&self, translations: &[Translation]) -> Result<()> {
+        for t in translations {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO cached_translations (abbreviation, name) VALUES (?1, ?2)",
+                params![t.id, t.name],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn get_cached_translations(&self) -> Result<Vec<Translation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT abbreviation, name FROM cached_translations ORDER BY name"
+        )?;
+        let result = stmt.query_map([], |row| {
+            Ok(Translation { id: row.get(0)?, name: row.get(1)? })
+        })?.collect::<Result<Vec<_>>>()?;
+        Ok(result)
+    }
+
+    // Catalog caching — books
+    pub fn cache_books(&self, translation: &str, books: &[BibleBook]) -> Result<()> {
+        for b in books {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO cached_books (translation, book_nr, book_name, chapter_count)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![translation, b.book_nr, b.name, b.chapters],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn get_cached_books(&self, translation: &str) -> Result<Vec<BibleBook>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT book_nr, book_name, chapter_count FROM cached_books
+             WHERE translation = ?1 ORDER BY book_nr"
+        )?;
+        let result = stmt.query_map(params![translation], |row| {
+            let book_nr: u32 = row.get(0)?;
+            Ok(BibleBook {
+                id: book_nr.to_string(),
+                book_nr,
+                name: row.get(1)?,
+                chapters: row.get(2)?,
+            })
+        })?.collect::<Result<Vec<_>>>()?;
+        Ok(result)
     }
 }
