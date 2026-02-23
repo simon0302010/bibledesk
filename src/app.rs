@@ -478,7 +478,6 @@ impl BibleDeskApp {
     }
 
     /// Color32 for the toolbar button indicator (opaque dot).
-    #[allow(dead_code)]
     fn mark_color_opaque(name: &str) -> Color32 {
         match name {
             "yellow" => Color32::from_rgb(255, 210,  30),
@@ -696,12 +695,8 @@ impl BibleDeskApp {
                     self.active_marker_color = None;
                 }
 
-                for (color_name, dot_color) in [
-                    ("pink",   Color32::from_rgb(240,  90, 150)),
-                    ("blue",   Color32::from_rgb( 60, 130, 240)),
-                    ("green",  Color32::from_rgb( 60, 185,  70)),
-                    ("yellow", Color32::from_rgb(230, 190,   0)),
-                ] {
+                for color_name in ["pink", "blue", "green", "yellow"] {
+                    let dot_color = BibleDeskApp::mark_color_opaque(color_name);
                     let active = self.active_marker_color == Some(color_name);
                     let btn = egui::Button::new(
                         RichText::new("●").color(dot_color).size(18.0),
@@ -799,7 +794,11 @@ impl BibleDeskApp {
                     // context menu (right-click saves, marks), then render words.
                     let words: Vec<&str> = verse.text.split_whitespace().collect();
 
-                    // Context menu anchored to a thin invisible strip
+                    // Context menu anchored to a zero-size invisible widget between the verse
+                    // number row and the word spans. This lets the user right-click anywhere
+                    // in the verse area to get the save/flashcard/mark-verse menu, while the
+                    // individual word Labels below handle left-click for word-level marking.
+                    // egui requires a `sense` to register context_menu interactions.
                     let anchor_resp = ui.add(egui::Label::new("").sense(egui::Sense::click()));
                     anchor_resp.context_menu(|ui| {
                         if saved_id.is_some() {
