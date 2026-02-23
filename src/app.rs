@@ -658,25 +658,15 @@ impl BibleDeskApp {
                 .find(|t| t.id == self.settings.default_translation)
                 .map(|t| t.name.clone())
                 .unwrap_or_else(|| self.settings.default_translation.clone());
+            let mut trans_sel = self.settings.default_translation.clone();
             egui::ComboBox::from_id_salt("trans_sel")
                 .selected_text(current_name)
                 .show_ui(ui, |ui| {
-                    let mut last_lang = String::new();
-                    for i in 0..self.translations.len() {
-                        let lang = self.translations[i].language.clone();
-                        let id   = self.translations[i].id.clone();
-                        let name = self.translations[i].name.clone();
-                        let sel  = self.settings.default_translation == id;
-                        if lang != last_lang {
-                            if !last_lang.is_empty() { ui.separator(); }
-                            ui.label(egui::RichText::new(&lang).strong());
-                            last_lang = lang;
-                        }
-                        if ui.selectable_label(sel, &name).clicked() {
-                            new_translation = Some(id);
-                        }
-                    }
+                    show_translation_combo_ui(ui, &self.translations, &mut trans_sel, None);
                 });
+            if trans_sel != self.settings.default_translation {
+                new_translation = Some(trans_sel);
+            }
 
             // Download Book button
             let dl_label = if self.book_downloading {
@@ -1015,24 +1005,13 @@ impl BibleDeskApp {
             egui::ComboBox::from_id_salt("search_trans_filter")
                 .selected_text(current)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(
+                    let all_label = self.locale.t("search.all_translations").to_string();
+                    show_translation_combo_ui(
+                        ui,
+                        &self.translations,
                         &mut self.search_translation_filter,
-                        "all".to_string(),
-                        self.locale.t("search.all_translations"),
+                        Some(("all", &all_label)),
                     );
-                    ui.separator();
-                    let mut last_lang = String::new();
-                    for i in 0..self.translations.len() {
-                        let lang = self.translations[i].language.clone();
-                        let id   = self.translations[i].id.clone();
-                        let name = self.translations[i].name.clone();
-                        if lang != last_lang {
-                            if !last_lang.is_empty() { ui.separator(); }
-                            ui.label(egui::RichText::new(&lang).strong());
-                            last_lang = lang;
-                        }
-                        ui.selectable_value(&mut self.search_translation_filter, id, name);
-                    }
                 });
         });
 
@@ -1283,24 +1262,13 @@ impl BibleDeskApp {
             egui::ComboBox::from_id_salt("saved_trans_filter")
                 .selected_text(current)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(
+                    let all_label = self.locale.t("search.all_translations").to_string();
+                    show_translation_combo_ui(
+                        ui,
+                        &self.translations,
                         &mut self.saved_filter,
-                        "all".to_string(),
-                        self.locale.t("search.all_translations"),
+                        Some(("all", &all_label)),
                     );
-                    ui.separator();
-                    let mut last_lang = String::new();
-                    for i in 0..self.translations.len() {
-                        let lang = self.translations[i].language.clone();
-                        let id   = self.translations[i].id.clone();
-                        let name = self.translations[i].name.clone();
-                        if lang != last_lang {
-                            if !last_lang.is_empty() { ui.separator(); }
-                            ui.label(egui::RichText::new(&lang).strong());
-                            last_lang = lang;
-                        }
-                        ui.selectable_value(&mut self.saved_filter, id, name);
-                    }
                 });
         });
 
@@ -1600,18 +1568,12 @@ impl BibleDeskApp {
             egui::ComboBox::from_id_salt("default_trans_sel")
                 .selected_text(trans_name)
                 .show_ui(ui, |ui| {
-                    let mut last_lang = String::new();
-                    for i in 0..self.translations.len() {
-                        let lang = self.translations[i].language.clone();
-                        let id   = self.translations[i].id.clone();
-                        let name = self.translations[i].name.clone();
-                        if lang != last_lang {
-                            if !last_lang.is_empty() { ui.separator(); }
-                            ui.label(egui::RichText::new(&lang).strong());
-                            last_lang = lang;
-                        }
-                        ui.selectable_value(&mut self.settings_translation_temp, id, name);
-                    }
+                    show_translation_combo_ui(
+                        ui,
+                        &self.translations,
+                        &mut self.settings_translation_temp,
+                        None,
+                    );
                 });
             ui.end_row();
 
@@ -1658,5 +1620,41 @@ impl BibleDeskApp {
         if self.settings_saved_msg {
             ui.label(RichText::new(self.locale.t("settings.saved")).color(Color32::GREEN));
         }
+    }
+}
+
+/// Render a translation picker with collapsible language groups.
+///
+/// * `translations` — list sorted by `(language, name)` (as returned by the API / DB)
+/// * `selected_id`  — mutable borrow of the currently-selected abbreviation string
+/// * `none_entry`   — optional `(id_value, display_label)` to show as the first "all" option
+fn show_translation_combo_ui(
+    ui: &mut Ui,
+    translations: &[Translation],
+    selected_id: &mut String,
+    none_entry: Option<(&str, &str)>,
+) {
+    if let Some((id_val, label)) = none_entry {
+        ui.selectable_value(selected_id, id_val.to_string(), label);
+        ui.separator();
+    }
+
+    let mut i = 0;
+    while i < translations.len() {
+        // Collect all translations in the same language group
+        let lang = translations[i].language.clone();
+        let group_start = i;
+        while i < translations.len() && translations[i].language == lang {
+            i += 1;
+        }
+        let group = &translations[group_start..i];
+
+        egui::CollapsingHeader::new(egui::RichText::new(&lang).strong())
+            .id_salt(&lang)
+            .show(ui, |ui| {
+                for t in group {
+                    ui.selectable_value(selected_id, t.id.clone(), &t.name);
+                }
+            });
     }
 }
