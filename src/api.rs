@@ -108,9 +108,13 @@ impl BibleClient {
 
         let mut list: Vec<Translation> = raw
             .into_values()
-            .map(|entry| Translation { id: entry.abbreviation, name: entry.translation })
+            .map(|entry| Translation {
+                id: entry.abbreviation,
+                name: entry.translation,
+                language: entry.language,
+            })
             .collect();
-        list.sort_by(|a, b| a.name.cmp(&b.name));
+        list.sort_by(|a, b| a.language.cmp(&b.language).then(a.name.cmp(&b.name)));
         Ok(list)
     }
 

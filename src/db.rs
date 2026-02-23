@@ -15,6 +15,13 @@ impl Database {
     }
 
     fn initialize(&self) -> Result<()> {
+        // Schema migration: add `language` column to cached_translations if it doesn't exist yet.
+        // SQLite returns an error for duplicate column; ignore it so old DBs are upgraded silently.
+        let _ = self.conn.execute(
+            "ALTER TABLE cached_translations ADD COLUMN language TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+
         self.conn.execute_batch("
             PRAGMA journal_mode=WAL;
 
@@ -379,8 +386,8 @@ impl Database {
     pub fn cache_translations(&self, translations: &[Translation]) -> Result<()> {
         for t in translations {
             self.conn.execute(
-                "INSERT OR REPLACE INTO cached_translations (abbreviation, name) VALUES (?1, ?2)",
-                params![t.id, t.name],
+                "INSERT OR REPLACE INTO cached_translations (abbreviation, name, language) VALUES (?1, ?2, ?3)",
+                params![t.id, t.name, t.language],
             )?;
         }
         Ok(())
@@ -388,10 +395,10 @@ impl Database {
 
     pub fn get_cached_translations(&self) -> Result<Vec<Translation>> {
         let mut stmt = self.conn.prepare(
-            "SELECT abbreviation, name FROM cached_translations ORDER BY name"
+            "SELECT abbreviation, name, language FROM cached_translations ORDER BY language, name"
         )?;
         let result = stmt.query_map([], |row| {
-            Ok(Translation { id: row.get(0)?, name: row.get(1)? })
+            Ok(Translation { id: row.get(0)?, name: row.get(1)?, language: row.get(2)? })
         })?.collect::<Result<Vec<_>>>()?;
         Ok(result)
     }

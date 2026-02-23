@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct Translation {
     pub id: String,
     pub name: String,
+    pub language: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

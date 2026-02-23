@@ -602,6 +602,9 @@ impl BibleDeskApp {
             self.marker_drag_active = false;
         }
 
+        // Track if the book selection changed (need to auto-load after the closure)
+        let mut book_changed = false;
+
         // Detect translation change so we can reload books
         let mut new_translation: Option<String> = None;
 
@@ -611,28 +614,27 @@ impl BibleDeskApp {
                 .show_ui(ui, |ui| {
                     for i in 0..self.books.len() {
                         let name = self.books[i].name.clone();
-                        let prev_idx = self.selected_book_idx;
-                        ui.selectable_value(&mut self.selected_book_idx, i, name);
-                        if self.selected_book_idx != prev_idx {
+                        if ui.selectable_label(self.selected_book_idx == i, &name).clicked()
+                            && self.selected_book_idx != i
+                        {
+                            self.selected_book_idx = i;
                             self.selected_chapter = 1;
+                            book_changed = true;
                         }
                     }
                 });
 
             ui.label(self.locale.t("reader.chapter"));
-            if max_chapters > 0 {
-                // Chapter count is known — show a proper dropdown
-                egui::ComboBox::from_id_salt("chapter_sel")
-                    .selected_text(self.selected_chapter.to_string())
-                    .show_ui(ui, |ui| {
-                        for c in 1..=max_chapters {
-                            ui.selectable_value(&mut self.selected_chapter, c, c.to_string());
-                        }
-                    });
-            } else {
-                // Chapter count not yet known (first load) — allow free input
-                ui.add(egui::DragValue::new(&mut self.selected_chapter).range(1..=u32::MAX));
-            }
+            // Always show a ComboBox. When max_chapters is not yet known (0), show a
+            // single-item placeholder dropdown with the current chapter number.
+            let display_max = if max_chapters > 0 { max_chapters } else { self.selected_chapter };
+            egui::ComboBox::from_id_salt("chapter_sel")
+                .selected_text(self.selected_chapter.to_string())
+                .show_ui(ui, |ui| {
+                    for c in 1..=display_max {
+                        ui.selectable_value(&mut self.selected_chapter, c, c.to_string());
+                    }
+                });
 
             ui.label(self.locale.t("reader.translation"));
             let current_name = self.translations.iter()
@@ -642,10 +644,17 @@ impl BibleDeskApp {
             egui::ComboBox::from_id_salt("trans_sel")
                 .selected_text(current_name)
                 .show_ui(ui, |ui| {
+                    let mut last_lang = String::new();
                     for i in 0..self.translations.len() {
+                        let lang = self.translations[i].language.clone();
                         let id   = self.translations[i].id.clone();
                         let name = self.translations[i].name.clone();
                         let sel  = self.settings.default_translation == id;
+                        if lang != last_lang {
+                            if !last_lang.is_empty() { ui.separator(); }
+                            ui.label(egui::RichText::new(&lang).strong());
+                            last_lang = lang;
+                        }
                         if ui.selectable_label(sel, &name).clicked() {
                             new_translation = Some(id);
                         }
@@ -680,6 +689,11 @@ impl BibleDeskApp {
             self.settings.default_translation = id;
             self.current_chapter = None;
             self.load_books_for_current_translation();
+        }
+
+        // Auto-load chapter 1 when the book selection changed
+        if book_changed && !self.chapter_loading {
+            self.load_chapter();
         }
 
         // Prev / Next navigation + right-side marker toolbar
@@ -993,9 +1007,17 @@ impl BibleDeskApp {
                         "all".to_string(),
                         self.locale.t("search.all_translations"),
                     );
+                    ui.separator();
+                    let mut last_lang = String::new();
                     for i in 0..self.translations.len() {
+                        let lang = self.translations[i].language.clone();
                         let id   = self.translations[i].id.clone();
                         let name = self.translations[i].name.clone();
+                        if lang != last_lang {
+                            if !last_lang.is_empty() { ui.separator(); }
+                            ui.label(egui::RichText::new(&lang).strong());
+                            last_lang = lang;
+                        }
                         ui.selectable_value(&mut self.search_translation_filter, id, name);
                     }
                 });
@@ -1253,9 +1275,17 @@ impl BibleDeskApp {
                         "all".to_string(),
                         self.locale.t("search.all_translations"),
                     );
+                    ui.separator();
+                    let mut last_lang = String::new();
                     for i in 0..self.translations.len() {
+                        let lang = self.translations[i].language.clone();
                         let id   = self.translations[i].id.clone();
                         let name = self.translations[i].name.clone();
+                        if lang != last_lang {
+                            if !last_lang.is_empty() { ui.separator(); }
+                            ui.label(egui::RichText::new(&lang).strong());
+                            last_lang = lang;
+                        }
                         ui.selectable_value(&mut self.saved_filter, id, name);
                     }
                 });
@@ -1557,9 +1587,16 @@ impl BibleDeskApp {
             egui::ComboBox::from_id_salt("default_trans_sel")
                 .selected_text(trans_name)
                 .show_ui(ui, |ui| {
+                    let mut last_lang = String::new();
                     for i in 0..self.translations.len() {
+                        let lang = self.translations[i].language.clone();
                         let id   = self.translations[i].id.clone();
                         let name = self.translations[i].name.clone();
+                        if lang != last_lang {
+                            if !last_lang.is_empty() { ui.separator(); }
+                            ui.label(egui::RichText::new(&lang).strong());
+                            last_lang = lang;
+                        }
                         ui.selectable_value(&mut self.settings_translation_temp, id, name);
                     }
                 });
