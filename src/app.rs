@@ -619,6 +619,9 @@ impl BibleDeskApp {
         // Track if the book selection changed (need to auto-load after the closure)
         let mut book_changed = false;
 
+        // Detect chapter ComboBox change (need to auto-load after the closure)
+        let prev_chapter = self.selected_chapter;
+
         // Detect translation change so we can reload books
         let mut new_translation: Option<String> = None;
 
@@ -675,15 +678,6 @@ impl BibleDeskApp {
                     }
                 });
 
-            let load_label = if self.chapter_loading {
-                self.locale.t("reader.loading")
-            } else {
-                self.locale.t("reader.load")
-            };
-            if ui.add_enabled(!self.chapter_loading, egui::Button::new(load_label)).clicked() {
-                self.load_chapter();
-            }
-
             // Download Book button
             let dl_label = if self.book_downloading {
                 self.locale.t("reader.downloading_book")
@@ -703,6 +697,11 @@ impl BibleDeskApp {
             self.settings.default_translation = id;
             self.current_chapter = None;
             self.load_books_for_current_translation();
+        }
+
+        // Auto-load when chapter ComboBox selection changed
+        if self.selected_chapter != prev_chapter && !self.chapter_loading {
+            self.load_chapter();
         }
 
         // Auto-load chapter 1 when the book selection changed
