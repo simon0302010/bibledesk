@@ -56,6 +56,9 @@ pub struct BibleDeskApp {
     chapter_loading: bool,
     chapter_receiver: Option<Receiver<Result<(Chapter, u32), String>>>,
     reader_status: String,
+    // Book download
+    book_downloading: bool,
+    book_download_receiver: Option<Receiver<Result<usize, String>>>,
 
     // Search state
     search_query: String,
@@ -179,6 +182,8 @@ impl BibleDeskApp {
             chapter_loading: false,
             chapter_receiver: None,
             reader_status: String::new(),
+            book_downloading: false,
+            book_download_receiver: None,
             search_query: String::new(),
             search_results: Vec::new(),
             search_translation_filter: "all".to_string(),
@@ -361,6 +366,46 @@ impl BibleDeskApp {
         self.search_results = db.search_verses(&query, filter.as_deref()).unwrap_or_default();
     }
 
+    fn start_book_download(&mut self) {
+        if self.book_downloading || self.books.is_empty() {
+            return;
+        }
+        let book = &self.books[self.selected_book_idx];
+        let book_nr = book.book_nr;
+        let translation = self.settings.default_translation.clone();
+        self.book_downloading = true;
+        self.reader_status = self.locale.t("reader.downloading_book").to_string();
+        let (tx, rx) = mpsc::channel();
+        self.book_download_receiver = Some(rx);
+        let db = self.db.clone();
+        thread::spawn(move || {
+            let result = BibleClient::download_book(&translation, book_nr).map(|verses| {
+                let count = verses.len();
+                if let Ok(db) = db.lock() {
+                    let _ = db.cache_verses(&verses);
+                }
+                count
+            });
+            let _ = tx.send(result);
+        });
+    }
+
+    fn poll_book_download(&mut self) {
+        let received = self.book_download_receiver.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(result) = received {
+            self.book_downloading = false;
+            self.book_download_receiver = None;
+            match result {
+                Ok(count) => {
+                    self.reader_status = format!("{} ({} verses)", self.locale.t("reader.book_downloaded"), count);
+                }
+                Err(e) => {
+                    self.reader_status = format!("Download error: {}", e);
+                }
+            }
+        }
+    }
+
     fn reload_saved(&mut self) {
         self.saved_verses = self.db.lock().unwrap().get_saved_verses().unwrap_or_default();
     }
@@ -392,7 +437,8 @@ impl eframe::App for BibleDeskApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_chapter_load();
         self.poll_catalog_load();
-        if self.chapter_loading || self.catalog_loading {
+        self.poll_book_download();
+        if self.chapter_loading || self.catalog_loading || self.book_downloading {
             ctx.request_repaint();
         }
 
@@ -530,6 +576,19 @@ impl BibleDeskApp {
             if ui.add_enabled(!self.chapter_loading, egui::Button::new(load_label)).clicked() {
                 self.load_chapter();
             }
+
+            // Download Book button
+            let dl_label = if self.book_downloading {
+                self.locale.t("reader.downloading_book")
+            } else {
+                self.locale.t("reader.download_book")
+            };
+            if ui.add_enabled(
+                !self.book_downloading && !self.chapter_loading,
+                egui::Button::new(dl_label),
+            ).clicked() {
+                self.start_book_download();
+            }
         });
 
         // Apply translation change after the closure
@@ -566,50 +625,80 @@ impl BibleDeskApp {
             ui.heading(format!("{} ({})", chapter.reference, trans_name));
             ui.separator();
 
-            // Build a fast lookup set of already-saved (book_name, chapter, verse, translation)
-            let saved_set: std::collections::HashSet<(String, u32, u32, String)> = self
+            // Collect pending actions from context menus (can't borrow self inside closure)
+            let mut save_verse: Option<Verse> = None;
+            let mut unsave_verse_id: Option<i64> = None;
+            let mut add_flashcard: Option<Verse> = None;
+
+            // Build a fast lookup: (book_name, chapter, verse, translation) → saved_verse id
+            let saved_map: std::collections::HashMap<(String, u32, u32, String), i64> = self
                 .saved_verses
                 .iter()
-                .map(|sv| (sv.book_name.clone(), sv.chapter, sv.verse, sv.translation.clone()))
+                .map(|sv| ((sv.book_name.clone(), sv.chapter, sv.verse, sv.translation.clone()), sv.id))
                 .collect();
 
             ScrollArea::vertical().id_salt("reader_scroll").show(ui, |ui| {
                 for verse in &chapter.verses {
+                    let key = (
+                        verse.book_name.clone(),
+                        verse.chapter,
+                        verse.verse,
+                        verse.translation.clone(),
+                    );
+                    let saved_id = saved_map.get(&key).copied();
+
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format!("{}.", verse.verse))
                                 .strong()
                                 .color(Color32::from_rgb(150, 180, 255)),
                         );
-                        ui.label(&verse.text);
+                        // Verse text with right-click context menu
+                        let resp = ui.label(&verse.text);
+                        resp.context_menu(|ui| {
+                            if saved_id.is_some() {
+                                if ui.button(self.locale.t("reader.verse_context_unsave")).clicked() {
+                                    unsave_verse_id = saved_id;
+                                    ui.close_menu();
+                                }
+                            } else {
+                                if ui.button(self.locale.t("reader.verse_context_save")).clicked() {
+                                    save_verse = Some(verse.clone());
+                                    ui.close_menu();
+                                }
+                            }
+                            if ui.button(self.locale.t("reader.verse_context_flashcard")).clicked() {
+                                add_flashcard = Some(verse.clone());
+                                ui.close_menu();
+                            }
+                        });
 
-                        let already_saved = saved_set.contains(&(
-                            verse.book_name.clone(),
-                            verse.chapter,
-                            verse.verse,
-                            verse.translation.clone(),
-                        ));
-                        if already_saved {
+                        // Inline saved indicator
+                        if saved_id.is_some() {
                             ui.label(
-                                RichText::new("✓ Saved")
+                                RichText::new("✓")
                                     .color(Color32::from_rgb(100, 200, 120))
                                     .small(),
                             );
-                        } else if ui.small_button(self.locale.t("reader.save_verse")).clicked() {
-                            let v = verse.clone();
-                            let _ = self.db.lock().unwrap().save_verse(&v, "");
-                            self.reload_saved();
-                        }
-
-                        if ui.small_button(self.locale.t("reader.add_flashcard")).clicked() {
-                            let v = verse.clone();
-                            let _ = self.db.lock().unwrap().add_memory_card(&v);
-                            self.reload_cards();
                         }
                     });
                     ui.add_space(4.0);
                 }
             });
+
+            // Apply deferred actions
+            if let Some(v) = save_verse {
+                let _ = self.db.lock().unwrap().save_verse(&v, "");
+                self.reload_saved();
+            }
+            if let Some(id) = unsave_verse_id {
+                let _ = self.db.lock().unwrap().delete_saved_verse(id);
+                self.reload_saved();
+            }
+            if let Some(v) = add_flashcard {
+                let _ = self.db.lock().unwrap().add_memory_card(&v);
+                self.reload_cards();
+            }
         } else if self.chapter_loading {
             ui.centered_and_justified(|ui| { ui.spinner(); });
         } else {

@@ -212,6 +212,43 @@ impl BibleClient {
 
         Ok((chapter, all_other_verses, total_chapters))
     }
+
+    /// Download every chapter of a book and return all verses for caching.
+    /// This fetches `/{abbr}/{book_nr}.json` (same endpoint as `fetch_chapter`) and
+    /// returns all verses in all chapters — no scripture is generated; it all comes
+    /// from the API.
+    pub fn download_book(abbr: &str, book_nr: u32) -> Result<Vec<Verse>, String> {
+        let url = format!("{}/{}/{}.json", BASE_URL, abbr, book_nr);
+        let resp = reqwest::blocking::get(&url)
+            .map_err(|e| format!("Network error: {}", e))?;
+        if !resp.status().is_success() {
+            return Err(format!("API error {}", resp.status()));
+        }
+        let body = resp.text()
+            .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+        let content: BookContent = parse_body(&body, &format!("{}/{}.json", abbr, book_nr))?;
+
+        let book_id = content.nr.to_string();
+        let book_name = content.name.clone();
+        let trans = content.abbreviation.clone();
+
+        let mut all_verses: Vec<Verse> = Vec::new();
+        for ch in content.chapters {
+            let ch_nr = ch.chapter;
+            for v in ch.verses {
+                all_verses.push(Verse {
+                    book_id: book_id.clone(),
+                    book_name: book_name.clone(),
+                    chapter: ch_nr,
+                    verse: v.verse,
+                    text: v.text.trim().to_string(),
+                    translation: trans.clone(),
+                });
+            }
+        }
+        Ok(all_verses)
+    }
 }
 
 
