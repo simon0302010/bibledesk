@@ -95,7 +95,13 @@ pub struct BibleDeskApp {
 impl BibleDeskApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let db_path = app_db_path();
-        let db = Database::open(&db_path).expect("Failed to open database");
+        let db = match Database::open(db_path.to_str().unwrap_or("bibledesk.db")) {
+            Ok(db) => db,
+            Err(e) => {
+                eprintln!("Error: failed to open database at '{}': {e}", db_path.display());
+                std::process::exit(1);
+            }
+        };
 
         let mut settings = Settings::default();
 
@@ -264,9 +270,12 @@ impl BibleDeskApp {
     }
 }
 
-fn app_db_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    format!("{}/bibledesk.db", home)
+fn app_db_path() -> std::path::PathBuf {
+    let mut dir = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    dir.push("bibledesk");
+    std::fs::create_dir_all(&dir).ok();
+    dir.push("bibledesk.db");
+    dir
 }
 
 impl eframe::App for BibleDeskApp {

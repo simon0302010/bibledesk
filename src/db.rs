@@ -297,13 +297,13 @@ impl Database {
             let mut stmt = self.conn.prepare("SELECT successes FROM memory_cards WHERE id = ?1")?;
             let successes: i64 = stmt.query_row(params![id], |r| r.get(0))?;
             let days = (successes + 1).min(30);
-            let next = (Local::now() + chrono::Duration::try_days(days).unwrap_or(chrono::Duration::days(1))).to_rfc3339();
+            let next = (Local::now() + chrono::Duration::days(days)).to_rfc3339();
             self.conn.execute(
                 "UPDATE memory_cards SET successes = successes + 1, last_reviewed = ?1, next_review = ?2 WHERE id = ?3",
                 params![now, next, id],
             )?;
         } else {
-            let next = (Local::now() + chrono::Duration::try_days(1).unwrap_or(chrono::Duration::days(1))).to_rfc3339();
+            let next = (Local::now() + chrono::Duration::days(1)).to_rfc3339();
             self.conn.execute(
                 "UPDATE memory_cards SET failures = failures + 1, last_reviewed = ?1, next_review = ?2 WHERE id = ?3",
                 params![now, next, id],
