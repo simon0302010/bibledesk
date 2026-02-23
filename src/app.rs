@@ -54,7 +54,7 @@ pub struct BibleDeskApp {
     selected_chapter: u32,
     current_chapter: Option<Chapter>,
     chapter_loading: bool,
-    chapter_receiver: Option<Receiver<Result<Chapter, String>>>,
+    chapter_receiver: Option<Receiver<Result<(Chapter, u32), String>>>,
     reader_status: String,
 
     // Search state
@@ -310,7 +310,7 @@ impl BibleDeskApp {
         thread::spawn(move || {
             let result = BibleClient::fetch_chapter(&translation, book_nr, chapter);
             match &result {
-                Ok((chap, other_verses)) => {
+                Ok((chap, other_verses, _total)) => {
                     if let Ok(db) = db.lock() {
                         // Cache the requested chapter
                         let _ = db.cache_verses(&chap.verses);
@@ -322,7 +322,7 @@ impl BibleDeskApp {
                 }
                 Err(_) => {}
             }
-            let _ = tx.send(result.map(|(chap, _)| chap));
+            let _ = tx.send(result.map(|(chap, _, total)| (chap, total)));
         });
     }
 
@@ -332,8 +332,12 @@ impl BibleDeskApp {
             self.chapter_loading = false;
             self.chapter_receiver = None;
             match result {
-                Ok(chapter) => {
+                Ok((chapter, total_chapters)) => {
                     self.reader_status = String::new();
+                    // Store the actual chapter count in the book entry so the selector can use it
+                    if total_chapters > 0 && self.selected_book_idx < self.books.len() {
+                        self.books[self.selected_book_idx].chapters = total_chapters;
+                    }
                     self.current_chapter = Some(chapter);
                 }
                 Err(e) => {
@@ -466,6 +470,7 @@ impl BibleDeskApp {
 
         // Controls row
         let selected_book_name = self.books[self.selected_book_idx].name.clone();
+        let max_chapters = self.books[self.selected_book_idx].chapters; // 0 = not yet known
 
         // Detect translation change so we can reload books
         let mut new_translation: Option<String> = None;
@@ -484,11 +489,20 @@ impl BibleDeskApp {
                     }
                 });
 
-            // The books.json API does not include a chapter count, so we use a
-            // DragValue that lets the user enter any chapter number. The API will
-            // return an error if the chapter doesn't exist.
             ui.label(self.locale.t("reader.chapter"));
-            ui.add(egui::DragValue::new(&mut self.selected_chapter).range(1..=u32::MAX));
+            if max_chapters > 0 {
+                // Chapter count is known — show a proper dropdown
+                egui::ComboBox::from_id_salt("chapter_sel")
+                    .selected_text(self.selected_chapter.to_string())
+                    .show_ui(ui, |ui| {
+                        for c in 1..=max_chapters {
+                            ui.selectable_value(&mut self.selected_chapter, c, c.to_string());
+                        }
+                    });
+            } else {
+                // Chapter count not yet known (first load) — allow free input
+                ui.add(egui::DragValue::new(&mut self.selected_chapter).range(1..=u32::MAX));
+            }
 
             ui.label(self.locale.t("reader.translation"));
             let current_name = self.translations.iter()
@@ -525,14 +539,15 @@ impl BibleDeskApp {
             self.load_books_for_current_translation();
         }
 
-        // Prev / Next navigation (no upper-bound guard; API error handles out-of-range)
+        // Prev / Next navigation
         ui.horizontal(|ui| {
             let can_prev = self.selected_chapter > 1;
+            let can_next = max_chapters == 0 || self.selected_chapter < max_chapters;
             if ui.add_enabled(can_prev, egui::Button::new(self.locale.t("reader.previous"))).clicked() {
                 self.selected_chapter -= 1;
                 self.load_chapter();
             }
-            if ui.button(self.locale.t("reader.next")).clicked() {
+            if ui.add_enabled(can_next, egui::Button::new(self.locale.t("reader.next"))).clicked() {
                 self.selected_chapter += 1;
                 self.load_chapter();
             }
@@ -551,6 +566,13 @@ impl BibleDeskApp {
             ui.heading(format!("{} ({})", chapter.reference, trans_name));
             ui.separator();
 
+            // Build a fast lookup set of already-saved (book_name, chapter, verse, translation)
+            let saved_set: std::collections::HashSet<(String, u32, u32, String)> = self
+                .saved_verses
+                .iter()
+                .map(|sv| (sv.book_name.clone(), sv.chapter, sv.verse, sv.translation.clone()))
+                .collect();
+
             ScrollArea::vertical().id_salt("reader_scroll").show(ui, |ui| {
                 for verse in &chapter.verses {
                     ui.horizontal(|ui| {
@@ -560,11 +582,25 @@ impl BibleDeskApp {
                                 .color(Color32::from_rgb(150, 180, 255)),
                         );
                         ui.label(&verse.text);
-                        if ui.small_button(self.locale.t("reader.save_verse")).clicked() {
+
+                        let already_saved = saved_set.contains(&(
+                            verse.book_name.clone(),
+                            verse.chapter,
+                            verse.verse,
+                            verse.translation.clone(),
+                        ));
+                        if already_saved {
+                            ui.label(
+                                RichText::new("✓ Saved")
+                                    .color(Color32::from_rgb(100, 200, 120))
+                                    .small(),
+                            );
+                        } else if ui.small_button(self.locale.t("reader.save_verse")).clicked() {
                             let v = verse.clone();
                             let _ = self.db.lock().unwrap().save_verse(&v, "");
                             self.reload_saved();
                         }
+
                         if ui.small_button(self.locale.t("reader.add_flashcard")).clicked() {
                             let v = verse.clone();
                             let _ = self.db.lock().unwrap().add_memory_card(&v);

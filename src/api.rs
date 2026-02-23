@@ -152,12 +152,12 @@ impl BibleClient {
     /// chapters. We parse the whole book, extract the requested chapter, and also
     /// return all other chapters' verses so the caller can cache them for free.
     ///
-    /// Returns `(requested_chapter, all_other_verses)`.
+    /// Returns `(requested_chapter, all_other_verses, total_chapter_count)`.
     pub fn fetch_chapter(
         abbr: &str,
         book_nr: u32,
         chapter_nr: u32,
-    ) -> Result<(Chapter, Vec<Verse>), String> {
+    ) -> Result<(Chapter, Vec<Verse>, u32), String> {
         let url = format!("{}/{}/{}.json", BASE_URL, abbr, book_nr);
         let resp = reqwest::blocking::get(&url)
             .map_err(|e| format!("Network error: {}", e))?;
@@ -172,6 +172,7 @@ impl BibleClient {
         let book_id = content.nr.to_string();
         let book_name = content.name.clone();
         let trans = content.abbreviation.clone();
+        let total_chapters = content.chapters.len() as u32;
 
         let mut requested: Option<Chapter> = None;
         let mut all_other_verses: Vec<Verse> = Vec::new();
@@ -205,13 +206,11 @@ impl BibleClient {
         }
 
         let chapter = requested.ok_or_else(|| {
-            format!("Chapter {} not found in {} (book has {} known chapters)",
-                chapter_nr, book_name,
-                // the chapters vec was consumed; include context from the URL
-                format!("{}/{}.json", abbr, book_nr))
+            format!("Chapter {} not found in {} (book has {} chapters)",
+                chapter_nr, book_name, total_chapters)
         })?;
 
-        Ok((chapter, all_other_verses))
+        Ok((chapter, all_other_verses, total_chapters))
     }
 }
 

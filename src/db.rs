@@ -44,6 +44,8 @@ impl Database {
                 note TEXT NOT NULL DEFAULT '',
                 saved_at TEXT NOT NULL
             );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_verses_unique
+                ON saved_verses(book_name, chapter, verse, translation);
 
             CREATE TABLE IF NOT EXISTS reading_plans (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -174,7 +176,7 @@ impl Database {
     pub fn save_verse(&self, verse: &Verse, note: &str) -> Result<i64> {
         let now = Local::now().to_rfc3339();
         self.conn.execute(
-            "INSERT INTO saved_verses (book_id, book_name, chapter, verse, text, translation, note, saved_at)
+            "INSERT OR IGNORE INTO saved_verses (book_id, book_name, chapter, verse, text, translation, note, saved_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![verse.book_id, verse.book_name, verse.chapter, verse.verse, verse.text, verse.translation, note, now],
         )?;
