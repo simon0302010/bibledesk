@@ -326,6 +326,14 @@ impl BibleDeskApp {
                         verses,
                         translation: translation.clone(),
                     });
+                    // Populate chapter count from the verses cache when not yet known
+                    if self.books[self.selected_book_idx].chapters == 0 {
+                        if let Ok(max_ch) = db.get_max_chapter(&book_name, &translation) {
+                            if max_ch > 0 {
+                                self.books[self.selected_book_idx].chapters = max_ch;
+                            }
+                        }
+                    }
                     self.reader_status = String::new();
                     return;
                 }
@@ -369,6 +377,12 @@ impl BibleDeskApp {
                     // Store the actual chapter count in the book entry so the selector can use it
                     if total_chapters > 0 && self.selected_book_idx < self.books.len() {
                         self.books[self.selected_book_idx].chapters = total_chapters;
+                        // Persist back to cached_books so cold restarts use the right count
+                        let translation = chapter.translation.clone();
+                        let book_nr = self.books[self.selected_book_idx].book_nr;
+                        if let Ok(db) = self.db.lock() {
+                            let _ = db.update_book_chapter_count(&translation, book_nr, total_chapters);
+                        }
                     }
                     self.current_chapter = Some(chapter);
                 }

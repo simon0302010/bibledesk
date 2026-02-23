@@ -513,6 +513,29 @@ impl Database {
         Ok(())
     }
 
+    /// Return the highest chapter number cached for a book+translation (0 if none cached).
+    pub fn get_max_chapter(&self, book_name: &str, translation: &str) -> Result<u32> {
+        let result = self.conn.query_row(
+            "SELECT COALESCE(MAX(chapter), 0) FROM verses WHERE book_name = ?1 AND translation = ?2",
+            params![book_name, translation],
+            |row| row.get::<_, u32>(0),
+        );
+        match result {
+            Ok(v) => Ok(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Persist the known chapter count for a book back into `cached_books`.
+    pub fn update_book_chapter_count(&self, translation: &str, book_nr: u32, count: u32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE cached_books SET chapter_count = ?1 WHERE translation = ?2 AND book_nr = ?3",
+            params![count, translation, book_nr],
+        )?;
+        Ok(())
+    }
+
     /// Returns all word marks as (book_name, chapter, verse, translation, word_idx, color).
     pub fn get_word_marks(&self) -> Result<Vec<(String, u32, u32, String, u32, String)>> {
         let mut stmt = self.conn.prepare(
