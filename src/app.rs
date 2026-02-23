@@ -105,8 +105,8 @@ pub struct BibleDeskApp {
     word_marks: std::collections::HashMap<(String, u32, u32, String, u32), String>,
     // Currently active marker color (None = marker off)
     active_marker_color: Option<&'static str>,
-    // True while the primary mouse button is held during a drag-mark operation
-    marker_drag_active: bool,
+    // Last word clicked for Shift+click range marking: (book, chapter, verse, translation, word_idx)
+    last_marked_word: Option<(String, u32, u32, String, u32)>,
 }
 
 impl BibleDeskApp {
@@ -237,7 +237,7 @@ impl BibleDeskApp {
             verse_marks,
             word_marks,
             active_marker_color: None,
-            marker_drag_active: false,
+            last_marked_word: None,
         }
     }
 
@@ -610,12 +610,6 @@ impl BibleDeskApp {
         let selected_book_name = self.books[self.selected_book_idx].name.clone();
         let max_chapters = self.books[self.selected_book_idx].chapters; // 0 = not yet known
 
-        // Track mouse button state for drag-to-mark; reset drag if button released
-        let mouse_down = ctx.input(|i| i.pointer.primary_down());
-        if !mouse_down {
-            self.marker_drag_active = false;
-        }
-
         // Track if the book selection changed (need to auto-load after the closure)
         let mut book_changed = false;
 
@@ -730,6 +724,7 @@ impl BibleDeskApp {
                 };
                 if ui.add(off_btn).clicked() {
                     self.active_marker_color = None;
+                    self.last_marked_word = None;
                 }
 
                 for color_name in ["pink", "blue", "green", "yellow"] {
@@ -744,7 +739,11 @@ impl BibleDeskApp {
                         btn
                     };
                     if ui.add(btn).clicked() {
-                        self.active_marker_color = if active { None } else { Some(color_name) };
+                        let new_color = if active { None } else { Some(color_name) };
+                        if new_color != self.active_marker_color {
+                            self.last_marked_word = None;
+                        }
+                        self.active_marker_color = new_color;
                     }
                 }
 
@@ -768,10 +767,11 @@ impl BibleDeskApp {
             let mut add_flashcard: Option<Verse> = None;
             let mut set_verse_mark: Option<(Verse, &'static str)> = None;
             let mut clear_verse_mark_v: Option<Verse> = None;
-            // Vec so drag can mark multiple words in one frame
+            // Words to mark/clear this frame
             let mut set_words: Vec<(String, u32, u32, String, u32, &'static str)> = Vec::new();
             let mut clear_words: Vec<(String, u32, u32, String, u32)> = Vec::new();
-            let mut start_drag = false;
+            // Word clicked this frame (for updating last_marked_word anchor)
+            let mut clicked_word: Option<(String, u32, u32, String, u32)> = None;
 
             // Fast lookups
             let saved_map: std::collections::HashMap<(String, u32, u32, String), i64> = self
@@ -793,11 +793,8 @@ impl BibleDeskApp {
             let verse_marks   = &self.verse_marks;
             let word_marks    = &self.word_marks;
             let active_color  = self.active_marker_color;
-            let drag_active   = self.marker_drag_active;
-            // Raw pointer position — used for rect-based drag hit-testing.
-            // resp.hovered() fails during drags because egui captures the pointer
-            // to the widget where the drag started; hover_pos() is always available.
-            let pointer_pos   = ctx.input(|i| i.pointer.hover_pos());
+            let last_anchor   = self.last_marked_word.clone();
+            let shift_held    = ctx.input(|i| i.modifiers.shift);
 
             ScrollArea::vertical().id_salt("reader_scroll").show(ui, |ui| {
                 ui.set_max_width(ui.available_width());
@@ -837,8 +834,7 @@ impl BibleDeskApp {
 
                     // Context menu anchored to a zero-size invisible widget between the verse
                     // number row and the word spans. This lets the user right-click anywhere
-                    // in the verse area to get the save/flashcard/mark-verse menu, while the
-                    // individual word Labels below handle left-click / drag for word-level marking.
+                    // in the verse area to get the save/flashcard/mark-verse menu.
                     let anchor_resp = ui.add(egui::Label::new("").sense(egui::Sense::click()));
                     anchor_resp.context_menu(|ui| {
                         if saved_id.is_some() {
@@ -891,46 +887,82 @@ impl BibleDeskApp {
                             };
 
                             let resp = ui.add(
-                                egui::Label::new(rt).sense(egui::Sense::click_and_drag()),
+                                egui::Label::new(rt).sense(egui::Sense::click()),
                             );
 
-                            // Start of a drag gesture → enable drag-mark for subsequent words
-                            if resp.drag_started() && active_color.is_some() {
-                                start_drag = true;
-                            }
-
-                            // Apply mark on click OR when pointer is physically over this word
-                            // while the mouse button is held (drag).  We use resp.rect +
-                            // raw hover_pos() instead of resp.hovered() because egui captures
-                            // the pointer to the first dragged widget, making hovered() return
-                            // false for all subsequent words in the drag path.
-                            let pointer_over = pointer_pos
-                                .map(|p| resp.rect.contains(p))
-                                .unwrap_or(false);
-                            let should_apply = resp.clicked()
-                                || (pointer_over && mouse_down && (drag_active || start_drag) && active_color.is_some());
-
-                            if should_apply {
+                            if resp.clicked() {
                                 if let Some(color) = active_color {
-                                    if word_color.map(|c| c.as_str()) == Some(color) {
-                                        // Toggle off
-                                        clear_words.push((
-                                            verse.book_name.clone(),
-                                            verse.chapter,
-                                            verse.verse,
-                                            verse.translation.clone(),
-                                            widx,
-                                        ));
+                                    if shift_held {
+                                        // Shift+click: mark the range from last_anchor to this word
+                                        if let Some(ref anchor) = last_anchor {
+                                            // Collect all word keys in order for the current chapter
+                                            // and mark everything between anchor and current word
+                                            let a_verse = anchor.1;
+                                            let a_widx  = anchor.4;
+                                            let c_verse = verse.verse;
+                                            let c_widx  = widx;
+                                            // Determine range direction
+                                            let (start_v, start_w, end_v, end_w) = if (a_verse, a_widx) <= (c_verse, c_widx) {
+                                                (a_verse, a_widx, c_verse, c_widx)
+                                            } else {
+                                                (c_verse, c_widx, a_verse, a_widx)
+                                            };
+                                            for rv in &chapter.verses {
+                                                if rv.verse < start_v || rv.verse > end_v { continue; }
+                                                let rwords: Vec<&str> = rv.text.split_whitespace().collect();
+                                                for (rwi, _) in rwords.iter().enumerate() {
+                                                    let rwi = rwi as u32;
+                                                    if rv.verse == start_v && rwi < start_w { continue; }
+                                                    if rv.verse == end_v   && rwi > end_w   { continue; }
+                                                    set_words.push((
+                                                        rv.book_name.clone(),
+                                                        rv.chapter,
+                                                        rv.verse,
+                                                        rv.translation.clone(),
+                                                        rwi,
+                                                        color,
+                                                    ));
+                                                }
+                                            }
+                                        } else {
+                                            // No anchor yet — treat as single word
+                                            set_words.push((
+                                                verse.book_name.clone(),
+                                                verse.chapter,
+                                                verse.verse,
+                                                verse.translation.clone(),
+                                                widx,
+                                                color,
+                                            ));
+                                        }
                                     } else {
-                                        set_words.push((
-                                            verse.book_name.clone(),
-                                            verse.chapter,
-                                            verse.verse,
-                                            verse.translation.clone(),
-                                            widx,
-                                            color,
-                                        ));
+                                        // Plain click: toggle single word
+                                        if word_color.map(|c| c.as_str()) == Some(color) {
+                                            clear_words.push((
+                                                verse.book_name.clone(),
+                                                verse.chapter,
+                                                verse.verse,
+                                                verse.translation.clone(),
+                                                widx,
+                                            ));
+                                        } else {
+                                            set_words.push((
+                                                verse.book_name.clone(),
+                                                verse.chapter,
+                                                verse.verse,
+                                                verse.translation.clone(),
+                                                widx,
+                                                color,
+                                            ));
+                                        }
                                     }
+                                    clicked_word = Some((
+                                        verse.book_name.clone(),
+                                        verse.chapter,
+                                        verse.verse,
+                                        verse.translation.clone(),
+                                        widx,
+                                    ));
                                 }
                             }
                         }
@@ -940,9 +972,9 @@ impl BibleDeskApp {
                 }
             });
 
-            // Persist drag state
-            if start_drag {
-                self.marker_drag_active = true;
+            // Update Shift+click anchor
+            if let Some(w) = clicked_word {
+                self.last_marked_word = Some(w);
             }
 
             // Apply deferred actions
