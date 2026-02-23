@@ -105,6 +105,16 @@ impl Database {
                 color TEXT NOT NULL,
                 PRIMARY KEY (book_name, chapter, verse, translation)
             );
+
+            CREATE TABLE IF NOT EXISTS word_marks (
+                book_name TEXT NOT NULL,
+                chapter INTEGER NOT NULL,
+                verse INTEGER NOT NULL,
+                translation TEXT NOT NULL,
+                word_idx INTEGER NOT NULL,
+                color TEXT NOT NULL,
+                PRIMARY KEY (book_name, chapter, verse, translation, word_idx)
+            );
         ")?;
         Ok(())
     }
@@ -458,6 +468,57 @@ impl Database {
                 row.get::<_, u32>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
+            ))
+        })?.collect::<Result<Vec<_>>>()?;
+        Ok(result)
+    }
+
+    // Word-level marks
+    pub fn set_word_mark(
+        &self,
+        book_name: &str,
+        chapter: u32,
+        verse: u32,
+        translation: &str,
+        word_idx: u32,
+        color: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO word_marks (book_name, chapter, verse, translation, word_idx, color)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![book_name, chapter, verse, translation, word_idx, color],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_word_mark(
+        &self,
+        book_name: &str,
+        chapter: u32,
+        verse: u32,
+        translation: &str,
+        word_idx: u32,
+    ) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM word_marks WHERE book_name=?1 AND chapter=?2 AND verse=?3 AND translation=?4 AND word_idx=?5",
+            params![book_name, chapter, verse, translation, word_idx],
+        )?;
+        Ok(())
+    }
+
+    /// Returns all word marks as (book_name, chapter, verse, translation, word_idx, color).
+    pub fn get_word_marks(&self) -> Result<Vec<(String, u32, u32, String, u32, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT book_name, chapter, verse, translation, word_idx, color FROM word_marks"
+        )?;
+        let result = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, u32>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, u32>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })?.collect::<Result<Vec<_>>>()?;
         Ok(result)
