@@ -28,20 +28,39 @@ struct TranslationEntry {
 
 /// Each entry in `/{abbr}/books.json` — field names as returned by getbible.net v2.
 /// The response also echoes back translation metadata per entry, which we ignore.
+/// `chapters` can be either a plain integer (chapter count) or an array of chapter
+/// objects — we normalise both into a u32 count.
 #[derive(Debug, Deserialize)]
 struct BookEntry {
     /// Book number (1-based)
     nr: u32,
     /// Book name (e.g. "Genesis")
     name: String,
-    /// Total number of chapters in this book
+    /// Either u32 count OR array of chapter objects — handled by chapters_as_count()
     #[serde(default)]
-    chapters: u32,
+    chapters: serde_json::Value,
     // Translation metadata fields echoed back — ignored but must be tolerated
     #[serde(default)]
     translation: String,
     #[serde(default)]
     abbreviation: String,
+}
+
+/// Normalise the `chapters` field to a chapter count regardless of whether the API
+/// returns it as a plain integer or as an array of chapter objects.
+fn chapters_as_count(val: &serde_json::Value, book_name: &str) -> u32 {
+    match val {
+        serde_json::Value::Number(n) => n.as_u64().unwrap_or(0) as u32,
+        serde_json::Value::Array(arr) => arr.len() as u32,
+        serde_json::Value::Null => {
+            eprintln!("[BibleDesk] chapters field missing for book '{}'", book_name);
+            0
+        }
+        other => {
+            eprintln!("[BibleDesk] unexpected chapters type for book '{}': {:?}", book_name, other);
+            0
+        }
+    }
 }
 
 // ── Chapter content ───────────────────────────────────────────────────────────
@@ -125,11 +144,14 @@ impl BibleClient {
 
         let mut books: Vec<BibleBook> = raw
             .into_values()
-            .map(|b| BibleBook {
-                id: b.nr.to_string(),
-                book_nr: b.nr,
-                name: b.name,
-                chapters: b.chapters,
+            .map(|b| {
+                let chapter_count = chapters_as_count(&b.chapters, &b.name);
+                BibleBook {
+                    id: b.nr.to_string(),
+                    book_nr: b.nr,
+                    name: b.name,
+                    chapters: chapter_count,
+                }
             })
             .collect();
         books.sort_by_key(|b| b.book_nr);
