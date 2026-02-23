@@ -51,8 +51,21 @@ impl BibleClient {
         if !resp.status().is_success() {
             return Err(format!("API error {}", resp.status()));
         }
-        let raw: HashMap<String, TranslationEntry> = resp.json()
-            .map_err(|e| format!("Parse error: {}", e))?;
+
+        // Get response text for better error reporting
+        let body = resp.text()
+            .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+        // Try parsing as HashMap (expected format)
+        let raw: HashMap<String, TranslationEntry> = serde_json::from_str(&body)
+            .map_err(|e| {
+                let preview = if body.len() > 200 {
+                    format!("{}...", &body[..200])
+                } else {
+                    body.clone()
+                };
+                format!("Parse error: {} (response preview: {})", e, preview)
+            })?;
 
         let mut list: Vec<Translation> = raw
             .into_iter()
@@ -70,8 +83,21 @@ impl BibleClient {
         if !resp.status().is_success() {
             return Err(format!("API error {}", resp.status()));
         }
-        let raw: HashMap<String, BookEntry> = resp.json()
-            .map_err(|e| format!("Parse error: {}", e))?;
+
+        // Get response text for better error reporting
+        let body = resp.text()
+            .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+        // Try parsing as HashMap (expected format)
+        let raw: HashMap<String, BookEntry> = serde_json::from_str(&body)
+            .map_err(|e| {
+                let preview = if body.len() > 200 {
+                    format!("{}...", &body[..200])
+                } else {
+                    body.clone()
+                };
+                format!("Parse error: {} (response preview: {})", e, preview)
+            })?;
 
         let mut books: Vec<BibleBook> = raw
             .into_values()
@@ -94,8 +120,21 @@ impl BibleClient {
         if !resp.status().is_success() {
             return Err(format!("API error {}", resp.status()));
         }
-        let content: ChapterContent = resp.json()
-            .map_err(|e| format!("Parse error: {}", e))?;
+
+        // Get response text for better error reporting
+        let body = resp.text()
+            .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+        // Try parsing as ChapterContent (expected format)
+        let content: ChapterContent = serde_json::from_str(&body)
+            .map_err(|e| {
+                let preview = if body.len() > 200 {
+                    format!("{}...", &body[..200])
+                } else {
+                    body.clone()
+                };
+                format!("Parse error: {} (response preview: {})", e, preview)
+            })?;
 
         let book_id = content.book_nr.to_string();
         let book_name = content.book_name.clone();
