@@ -47,6 +47,7 @@ pub struct BibleDeskApp {
     // Catalog loading (translations + books fetched from API)
     catalog_loading: bool,
     catalog_receiver: Option<Receiver<Result<(Vec<Translation>, Vec<BibleBook>), String>>>,
+    catalog_error: Option<String>,
 
     // Reader state
     selected_book_idx: usize,
@@ -171,6 +172,7 @@ impl BibleDeskApp {
             current_tab: Tab::Reader,
             catalog_loading,
             catalog_receiver,
+            catalog_error: None,
             selected_book_idx: 0,
             selected_chapter: 1,
             current_chapter: None,
@@ -246,6 +248,7 @@ impl BibleDeskApp {
             self.catalog_receiver = None;
             match result {
                 Ok((translations, books)) => {
+                    self.catalog_error = None;
                     if !translations.is_empty() {
                         self.translations = translations;
                         // Keep default translation valid
@@ -263,7 +266,7 @@ impl BibleDeskApp {
                     }
                 }
                 Err(e) => {
-                    self.reader_status = format!("Catalog error: {}", e);
+                    self.catalog_error = Some(e);
                 }
             }
         }
@@ -434,6 +437,18 @@ impl BibleDeskApp {
                 if self.catalog_loading {
                     ui.spinner();
                     ui.label("Loading Bible catalog from API...");
+                } else if let Some(error) = &self.catalog_error {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("Failed to load Bible catalog")
+                                .color(Color32::from_rgb(255, 100, 100))
+                                .size(16.0)
+                        );
+                        ui.add_space(8.0);
+                        ui.label(format!("Error: {}", error));
+                        ui.add_space(8.0);
+                        ui.label("Please check your internet connection and restart the application.");
+                    });
                 } else {
                     ui.label("Book list unavailable. Check your internet connection and restart.");
                 }
