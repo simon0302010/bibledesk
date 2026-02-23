@@ -770,7 +770,8 @@ impl BibleDeskApp {
             // Words to mark/clear this frame
             let mut set_words: Vec<(String, u32, u32, String, u32, &'static str)> = Vec::new();
             let mut clear_words: Vec<(String, u32, u32, String, u32)> = Vec::new();
-            // Word clicked this frame (for updating last_marked_word anchor)
+            // Word plain-clicked this frame (for updating last_marked_word anchor).
+            // Shift+clicks do NOT update the anchor — anchor stays fixed until a new plain click.
             let mut clicked_word: Option<(String, u32, u32, String, u32)> = None;
 
             // Fast lookups
@@ -936,7 +937,7 @@ impl BibleDeskApp {
                                             ));
                                         }
                                     } else {
-                                        // Plain click: toggle single word
+                                        // Plain click: toggle single word and update anchor
                                         if word_color.map(|c| c.as_str()) == Some(color) {
                                             clear_words.push((
                                                 verse.book_name.clone(),
@@ -955,14 +956,15 @@ impl BibleDeskApp {
                                                 color,
                                             ));
                                         }
+                                        // Plain click sets the new anchor for future Shift+clicks
+                                        clicked_word = Some((
+                                            verse.book_name.clone(),
+                                            verse.chapter,
+                                            verse.verse,
+                                            verse.translation.clone(),
+                                            widx,
+                                        ));
                                     }
-                                    clicked_word = Some((
-                                        verse.book_name.clone(),
-                                        verse.chapter,
-                                        verse.verse,
-                                        verse.translation.clone(),
-                                        widx,
-                                    ));
                                 }
                             }
                         }
@@ -972,7 +974,7 @@ impl BibleDeskApp {
                 }
             });
 
-            // Update Shift+click anchor
+            // Update anchor only on plain clicks (Shift+clicks keep the anchor fixed)
             if let Some(w) = clicked_word {
                 self.last_marked_word = Some(w);
             }
