@@ -309,12 +309,20 @@ impl BibleDeskApp {
         let db = self.db.clone();
         thread::spawn(move || {
             let result = BibleClient::fetch_chapter(&translation, book_nr, chapter);
-            if let Ok(ref chap) = result {
-                if let Ok(db) = db.lock() {
-                    let _ = db.cache_verses(&chap.verses);
+            match &result {
+                Ok((chap, other_verses)) => {
+                    if let Ok(db) = db.lock() {
+                        // Cache the requested chapter
+                        let _ = db.cache_verses(&chap.verses);
+                        // Also cache all other chapters fetched from the same book response
+                        if !other_verses.is_empty() {
+                            let _ = db.cache_verses(other_verses);
+                        }
+                    }
                 }
+                Err(_) => {}
             }
-            let _ = tx.send(result);
+            let _ = tx.send(result.map(|(chap, _)| chap));
         });
     }
 

@@ -25,44 +25,43 @@ struct TranslationEntry {
 }
 
 // ── Book list ─────────────────────────────────────────────────────────────────
+//
+// GET /{abbr}/books.json → object keyed by ordinal; each value has: abbreviation,
+// direction, encoding, lang, language, name, nr, sha, translation, url.
+// No chapter count is provided; the chapter count comes from fetching the full book.
 
-/// Extract a chapter count from a raw book entry, trying every known field name the
-/// getbible.net v2 API might use, and handling both an integer count and an array of
-/// chapter objects.
-///
-/// Known field names observed in the wild: "chapters", "chapter_nr".
-fn extract_chapter_count(entry: &serde_json::Value, book_name: &str) -> u32 {
-    for key in &["chapters", "chapter_nr"] {
-        if let Some(val) = entry.get(key) {
-            match val {
-                serde_json::Value::Number(n) => return n.as_u64().unwrap_or(0) as u32,
-                serde_json::Value::Array(arr) => return arr.len() as u32,
-                serde_json::Value::Object(obj) => return obj.len() as u32,
-                _ => {}
-            }
-        }
-    }
-    eprintln!(
-        "[BibleDesk] could not determine chapter count for book '{}'; raw entry: {}",
-        book_name, entry
-    );
-    0
-}
+// ── Book content ─────────────────────────────────────────────────────────────
+//
+// GET /{abbr}/{book_nr}.json → the full book with all chapters as an array:
+//
+//   {
+//     "abbreviation": "elberfelder1905",
+//     "nr": 36,
+//     "name": "Zefanja",
+//     "chapters": [
+//       { "chapter": 1, "name": "Zefanja 1", "verses": [{ "verse": 1, "text": "..." }, ...] },
+//       ...
+//     ]
+//   }
 
-// ── Chapter content ───────────────────────────────────────────────────────────
-
-/// The getbible.net v2 chapter endpoint returns verses as a JSON array.
 #[derive(Debug, Deserialize)]
-struct ChapterContent {
-    #[serde(default)]
-    book_nr: u32,
-    #[serde(default)]
-    book_name: String,
-    #[serde(default)]
-    chapter_nr: u32,
+struct BookContent {
     #[serde(default)]
     abbreviation: String,
-    /// Verses are returned as an array, not a map.
+    #[serde(default)]
+    nr: u32,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    chapters: Vec<ChapterEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChapterEntry {
+    chapter: u32,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
     verses: Vec<VerseEntry>,
 }
 
@@ -115,7 +114,8 @@ impl BibleClient {
         Ok(list)
     }
 
-    /// Fetch the list of books (with chapter counts) for a given translation.
+    /// Fetch the list of books for a given translation.
+    /// Note: the books.json endpoint does not include chapter counts.
     pub fn fetch_books(abbr: &str) -> Result<Vec<BibleBook>, String> {
         let url = format!("{}/{}/books.json", BASE_URL, abbr);
         let resp = reqwest::blocking::get(&url)
@@ -126,7 +126,6 @@ impl BibleClient {
         let body = resp.text()
             .map_err(|e| format!("Failed to read response body: {}", e))?;
 
-        // Parse as a map of raw JSON values so we can probe any field name for the chapter count.
         let raw: HashMap<String, serde_json::Value> =
             parse_body(&body, &format!("{}/books.json", abbr))?;
 
@@ -135,12 +134,11 @@ impl BibleClient {
             .filter_map(|entry| {
                 let book_nr = entry.get("nr")?.as_u64()? as u32;
                 let name = entry.get("name")?.as_str()?.to_string();
-                let chapters = extract_chapter_count(&entry, &name);
                 Some(BibleBook {
                     id: book_nr.to_string(),
                     book_nr,
                     name,
-                    chapters,
+                    chapters: 0, // chapter count unknown until book is fetched
                 })
             })
             .collect();
@@ -148,9 +146,19 @@ impl BibleClient {
         Ok(books)
     }
 
-    /// Fetch a single chapter from getbible.net v2.
-    pub fn fetch_chapter(abbr: &str, book_nr: u32, chapter_nr: u32) -> Result<Chapter, String> {
-        let url = format!("{}/{}/{}/{}.json", BASE_URL, abbr, book_nr, chapter_nr);
+    /// Fetch a chapter from getbible.net v2.
+    ///
+    /// The API endpoint `/{abbr}/{book_nr}.json` returns the **entire book** with all
+    /// chapters. We parse the whole book, extract the requested chapter, and also
+    /// return all other chapters' verses so the caller can cache them for free.
+    ///
+    /// Returns `(requested_chapter, all_other_verses)`.
+    pub fn fetch_chapter(
+        abbr: &str,
+        book_nr: u32,
+        chapter_nr: u32,
+    ) -> Result<(Chapter, Vec<Verse>), String> {
+        let url = format!("{}/{}/{}.json", BASE_URL, abbr, book_nr);
         let resp = reqwest::blocking::get(&url)
             .map_err(|e| format!("Network error: {}", e))?;
         if !resp.status().is_success() {
@@ -159,37 +167,52 @@ impl BibleClient {
         let body = resp.text()
             .map_err(|e| format!("Failed to read response body: {}", e))?;
 
-        let content: ChapterContent = parse_body(
-            &body,
-            &format!("{}/{}/{}.json", abbr, book_nr, chapter_nr),
-        )?;
+        let content: BookContent = parse_body(&body, &format!("{}/{}.json", abbr, book_nr))?;
 
-        let book_id = content.book_nr.to_string();
-        let book_name = content.book_name.clone();
-        let ch_nr = content.chapter_nr;
+        let book_id = content.nr.to_string();
+        let book_name = content.name.clone();
         let trans = content.abbreviation.clone();
 
-        let mut verses: Vec<Verse> = content
-            .verses
-            .into_iter()
-            .map(|v| Verse {
-                book_id: book_id.clone(),
-                book_name: book_name.clone(),
-                chapter: ch_nr,
-                verse: v.verse,
-                text: v.text.trim().to_string(),
-                translation: trans.clone(),
-            })
-            .collect();
-        verses.sort_by_key(|v| v.verse);
+        let mut requested: Option<Chapter> = None;
+        let mut all_other_verses: Vec<Verse> = Vec::new();
 
-        Ok(Chapter {
-            reference: format!("{} {}", book_name, ch_nr),
-            book_name,
-            chapter_num: ch_nr,
-            verses,
-            translation: trans,
-        })
+        for ch in content.chapters {
+            let ch_nr = ch.chapter;
+            let mut verses: Vec<Verse> = ch.verses
+                .into_iter()
+                .map(|v| Verse {
+                    book_id: book_id.clone(),
+                    book_name: book_name.clone(),
+                    chapter: ch_nr,
+                    verse: v.verse,
+                    text: v.text.trim().to_string(),
+                    translation: trans.clone(),
+                })
+                .collect();
+            verses.sort_by_key(|v| v.verse);
+
+            if ch_nr == chapter_nr {
+                requested = Some(Chapter {
+                    reference: format!("{} {}", book_name, ch_nr),
+                    book_name: book_name.clone(),
+                    chapter_num: ch_nr,
+                    verses,
+                    translation: trans.clone(),
+                });
+            } else {
+                all_other_verses.extend(verses);
+            }
+        }
+
+        let chapter = requested.ok_or_else(|| {
+            format!("Chapter {} not found in {} (book has {} known chapters)",
+                chapter_nr, book_name,
+                // the chapters vec was consumed; include context from the URL
+                format!("{}/{}.json", abbr, book_nr))
+        })?;
+
+        Ok((chapter, all_other_verses))
     }
 }
+
 
