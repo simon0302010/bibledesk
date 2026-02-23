@@ -458,7 +458,6 @@ impl BibleDeskApp {
 
         // Controls row
         let selected_book_name = self.books[self.selected_book_idx].name.clone();
-        let max_chapters = self.books[self.selected_book_idx].chapters;
 
         // Detect translation change so we can reload books
         let mut new_translation: Option<String> = None;
@@ -469,18 +468,19 @@ impl BibleDeskApp {
                 .show_ui(ui, |ui| {
                     for i in 0..self.books.len() {
                         let name = self.books[i].name.clone();
+                        let prev_idx = self.selected_book_idx;
                         ui.selectable_value(&mut self.selected_book_idx, i, name);
+                        if self.selected_book_idx != prev_idx {
+                            self.selected_chapter = 1;
+                        }
                     }
                 });
 
+            // The books.json API does not include a chapter count, so we use a
+            // DragValue that lets the user enter any chapter number. The API will
+            // return an error if the chapter doesn't exist.
             ui.label(self.locale.t("reader.chapter"));
-            egui::ComboBox::from_id_salt("chapter_sel")
-                .selected_text(self.selected_chapter.to_string())
-                .show_ui(ui, |ui| {
-                    for c in 1..=max_chapters {
-                        ui.selectable_value(&mut self.selected_chapter, c, c.to_string());
-                    }
-                });
+            ui.add(egui::DragValue::new(&mut self.selected_chapter).range(1..=u32::MAX));
 
             ui.label(self.locale.t("reader.translation"));
             let current_name = self.translations.iter()
@@ -517,15 +517,14 @@ impl BibleDeskApp {
             self.load_books_for_current_translation();
         }
 
-        // Prev / Next navigation
+        // Prev / Next navigation (no upper-bound guard; API error handles out-of-range)
         ui.horizontal(|ui| {
             let can_prev = self.selected_chapter > 1;
-            let can_next = self.selected_chapter < max_chapters;
             if ui.add_enabled(can_prev, egui::Button::new(self.locale.t("reader.previous"))).clicked() {
                 self.selected_chapter -= 1;
                 self.load_chapter();
             }
-            if ui.add_enabled(can_next, egui::Button::new(self.locale.t("reader.next"))).clicked() {
+            if ui.button(self.locale.t("reader.next")).clicked() {
                 self.selected_chapter += 1;
                 self.load_chapter();
             }
