@@ -26,41 +26,27 @@ struct TranslationEntry {
 
 // ── Book list ─────────────────────────────────────────────────────────────────
 
-/// Each entry in `/{abbr}/books.json` — field names as returned by getbible.net v2.
-/// The response also echoes back translation metadata per entry, which we ignore.
-/// `chapters` can be either a plain integer (chapter count) or an array of chapter
-/// objects — we normalise both into a u32 count.
-#[derive(Debug, Deserialize)]
-struct BookEntry {
-    /// Book number (1-based)
-    nr: u32,
-    /// Book name (e.g. "Genesis")
-    name: String,
-    /// Either u32 count OR array of chapter objects — handled by chapters_as_count()
-    #[serde(default)]
-    chapters: serde_json::Value,
-    // Translation metadata fields echoed back — ignored but must be tolerated
-    #[serde(default)]
-    translation: String,
-    #[serde(default)]
-    abbreviation: String,
-}
-
-/// Normalise the `chapters` field to a chapter count regardless of whether the API
-/// returns it as a plain integer or as an array of chapter objects.
-fn chapters_as_count(val: &serde_json::Value, book_name: &str) -> u32 {
-    match val {
-        serde_json::Value::Number(n) => n.as_u64().unwrap_or(0) as u32,
-        serde_json::Value::Array(arr) => arr.len() as u32,
-        serde_json::Value::Null => {
-            eprintln!("[BibleDesk] chapters field missing for book '{}'", book_name);
-            0
-        }
-        other => {
-            eprintln!("[BibleDesk] unexpected chapters type for book '{}': {:?}", book_name, other);
-            0
+/// Extract a chapter count from a raw book entry, trying every known field name the
+/// getbible.net v2 API might use, and handling both an integer count and an array of
+/// chapter objects.
+///
+/// Known field names observed in the wild: "chapters", "chapter_nr".
+fn extract_chapter_count(entry: &serde_json::Value, book_name: &str) -> u32 {
+    for key in &["chapters", "chapter_nr"] {
+        if let Some(val) = entry.get(key) {
+            match val {
+                serde_json::Value::Number(n) => return n.as_u64().unwrap_or(0) as u32,
+                serde_json::Value::Array(arr) => return arr.len() as u32,
+                serde_json::Value::Object(obj) => return obj.len() as u32,
+                _ => {}
+            }
         }
     }
+    eprintln!(
+        "[BibleDesk] could not determine chapter count for book '{}'; raw entry: {}",
+        book_name, entry
+    );
+    0
 }
 
 // ── Chapter content ───────────────────────────────────────────────────────────
@@ -140,18 +126,22 @@ impl BibleClient {
         let body = resp.text()
             .map_err(|e| format!("Failed to read response body: {}", e))?;
 
-        let raw: HashMap<String, BookEntry> = parse_body(&body, &format!("{}/books.json", abbr))?;
+        // Parse as a map of raw JSON values so we can probe any field name for the chapter count.
+        let raw: HashMap<String, serde_json::Value> =
+            parse_body(&body, &format!("{}/books.json", abbr))?;
 
         let mut books: Vec<BibleBook> = raw
             .into_values()
-            .map(|b| {
-                let chapter_count = chapters_as_count(&b.chapters, &b.name);
-                BibleBook {
-                    id: b.nr.to_string(),
-                    book_nr: b.nr,
-                    name: b.name,
-                    chapters: chapter_count,
-                }
+            .filter_map(|entry| {
+                let book_nr = entry.get("nr")?.as_u64()? as u32;
+                let name = entry.get("name")?.as_str()?.to_string();
+                let chapters = extract_chapter_count(&entry, &name);
+                Some(BibleBook {
+                    id: book_nr.to_string(),
+                    book_nr,
+                    name,
+                    chapters,
+                })
             })
             .collect();
         books.sort_by_key(|b| b.book_nr);
