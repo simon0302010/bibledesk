@@ -1634,27 +1634,29 @@ fn show_translation_combo_ui(
     selected_id: &mut String,
     none_entry: Option<(&str, &str)>,
 ) {
-    if let Some((id_val, label)) = none_entry {
-        ui.selectable_value(selected_id, id_val.to_string(), label);
-        ui.separator();
-    }
-
-    let mut i = 0;
-    while i < translations.len() {
-        // Collect all translations in the same language group
-        let lang = translations[i].language.clone();
-        let group_start = i;
-        while i < translations.len() && translations[i].language == lang {
-            i += 1;
+    egui::ScrollArea::vertical().max_height(500.0).show(ui, |ui| {
+        if let Some((id_val, label)) = none_entry {
+            ui.selectable_value(selected_id, id_val.to_string(), label);
+            ui.separator();
         }
-        let group = &translations[group_start..i];
 
-        egui::CollapsingHeader::new(egui::RichText::new(&lang).strong())
-            .id_salt(&lang)
-            .show(ui, |ui| {
-                for t in group {
-                    ui.selectable_value(selected_id, t.id.clone(), &t.name);
-                }
-            });
-    }
+        let mut i = 0;
+        while i < translations.len() {
+            let lang = translations[i].language.clone();
+            let group_start = i;
+            while i < translations.len() && translations[i].language == lang {
+                i += 1;
+            }
+            let group = &translations[group_start..i];
+
+            let display_lang = if lang.is_empty() { "Unknown".to_string() } else { lang.clone() };
+            egui::CollapsingHeader::new(egui::RichText::new(&display_lang).strong())
+                .id_salt(&lang)
+                .show(ui, |ui| {
+                    for t in group {
+                        ui.selectable_value(selected_id, t.id.clone(), &t.name);
+                    }
+                });
+        }
+    });
 }

@@ -21,6 +21,13 @@ impl Database {
             "ALTER TABLE cached_translations ADD COLUMN language TEXT NOT NULL DEFAULT ''",
             [],
         );
+        // Clear stale rows that were cached before the language column existed.
+        // They have language = '' and would appear under a blank group header.
+        // Deleting them forces a fresh API fetch that includes the language field.
+        let _ = self.conn.execute(
+            "DELETE FROM cached_translations WHERE language = ''",
+            [],
+        );
 
         self.conn.execute_batch("
             PRAGMA journal_mode=WAL;
