@@ -105,6 +105,8 @@ pub struct BibleDeskApp {
     word_marks: std::collections::HashMap<(String, u32, u32, String, u32), String>,
     // Currently active marker color (None = marker off)
     active_marker_color: Option<&'static str>,
+    // True while the primary mouse button is held during a drag-mark operation
+    marker_drag_active: bool,
 }
 
 impl BibleDeskApp {
@@ -235,6 +237,7 @@ impl BibleDeskApp {
             verse_marks,
             word_marks,
             active_marker_color: None,
+            marker_drag_active: false,
         }
     }
 
@@ -466,14 +469,25 @@ impl BibleDeskApp {
             .collect();
     }
 
-    /// Convert a stored color name to an egui Color32 (semi-transparent background).
+    /// Convert a stored color name to an opaque background Color32 for word highlights.
     fn mark_color(name: &str) -> Color32 {
         match name {
-            "yellow" => Color32::from_rgba_unmultiplied(255, 220,  40, 180),
-            "green"  => Color32::from_rgba_unmultiplied( 60, 200,  80, 180),
-            "blue"   => Color32::from_rgba_unmultiplied( 80, 150, 255, 180),
-            "pink"   => Color32::from_rgba_unmultiplied(255, 110, 170, 180),
+            "yellow" => Color32::from_rgb(255, 220,  40),
+            "green"  => Color32::from_rgb( 50, 190,  70),
+            "blue"   => Color32::from_rgb( 80, 150, 255),
+            "pink"   => Color32::from_rgb(255, 110, 170),
             _        => Color32::TRANSPARENT,
+        }
+    }
+
+    /// Foreground (text) color to use on top of a mark background for readability.
+    fn mark_text_color(name: &str) -> Color32 {
+        match name {
+            "yellow" => Color32::from_rgb(30, 20, 0),
+            "green"  => Color32::BLACK,
+            "blue"   => Color32::WHITE,
+            "pink"   => Color32::BLACK,
+            _        => Color32::BLACK,
         }
     }
 
@@ -552,7 +566,7 @@ impl eframe::App for BibleDeskApp {
 // ── Tab implementations ──────────────────────────────────────────────────────
 
 impl BibleDeskApp {
-    fn show_reader(&mut self, ui: &mut Ui, _ctx: &egui::Context) {
+    fn show_reader(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         // While catalog is loading and no books are available yet, show a spinner
         if self.books.is_empty() {
             ui.centered_and_justified(|ui| {
@@ -581,6 +595,12 @@ impl BibleDeskApp {
         // Controls row
         let selected_book_name = self.books[self.selected_book_idx].name.clone();
         let max_chapters = self.books[self.selected_book_idx].chapters; // 0 = not yet known
+
+        // Track mouse button state for drag-to-mark; reset drag if button released
+        let mouse_down = ctx.input(|i| i.pointer.primary_down());
+        if !mouse_down {
+            self.marker_drag_active = false;
+        }
 
         // Detect translation change so we can reload books
         let mut new_translation: Option<String> = None;
@@ -731,9 +751,10 @@ impl BibleDeskApp {
             let mut add_flashcard: Option<Verse> = None;
             let mut set_verse_mark: Option<(Verse, &'static str)> = None;
             let mut clear_verse_mark_v: Option<Verse> = None;
-            // (verse_key, word_idx, color) — set or clear
-            let mut set_word: Option<(String, u32, u32, String, u32, &'static str)> = None;
-            let mut clear_word: Option<(String, u32, u32, String, u32)> = None;
+            // Vec so drag can mark multiple words in one frame
+            let mut set_words: Vec<(String, u32, u32, String, u32, &'static str)> = Vec::new();
+            let mut clear_words: Vec<(String, u32, u32, String, u32)> = Vec::new();
+            let mut start_drag = false;
 
             // Fast lookups
             let saved_map: std::collections::HashMap<(String, u32, u32, String), i64> = self
@@ -755,6 +776,7 @@ impl BibleDeskApp {
             let verse_marks   = &self.verse_marks;
             let word_marks    = &self.word_marks;
             let active_color  = self.active_marker_color;
+            let drag_active   = self.marker_drag_active;
 
             ScrollArea::vertical().id_salt("reader_scroll").show(ui, |ui| {
                 ui.set_max_width(ui.available_width());
@@ -790,15 +812,12 @@ impl BibleDeskApp {
                     });
 
                     // ── Word-by-word rendering with highlight support ─────────
-                    // We add the whole text as a transparent label for the
-                    // context menu (right-click saves, marks), then render words.
                     let words: Vec<&str> = verse.text.split_whitespace().collect();
 
                     // Context menu anchored to a zero-size invisible widget between the verse
                     // number row and the word spans. This lets the user right-click anywhere
                     // in the verse area to get the save/flashcard/mark-verse menu, while the
-                    // individual word Labels below handle left-click for word-level marking.
-                    // egui requires a `sense` to register context_menu interactions.
+                    // individual word Labels below handle left-click / drag for word-level marking.
                     let anchor_resp = ui.add(egui::Label::new("").sense(egui::Sense::click()));
                     anchor_resp.context_menu(|ui| {
                         if saved_id.is_some() {
@@ -841,22 +860,33 @@ impl BibleDeskApp {
                             );
                             let word_color = word_marks.get(&wkey);
 
+                            // Build RichText: highlighted words use opaque background + contrasting foreground
                             let rt = if let Some(color_name) = word_color {
                                 RichText::new(*word)
                                     .background_color(BibleDeskApp::mark_color(color_name))
+                                    .color(BibleDeskApp::mark_text_color(color_name))
                             } else {
                                 RichText::new(*word)
                             };
 
                             let resp = ui.add(
-                                egui::Label::new(rt).sense(egui::Sense::click()),
+                                egui::Label::new(rt).sense(egui::Sense::click_and_drag()),
                             );
 
-                            if resp.clicked() {
+                            // Start of a drag gesture → enable drag-mark for subsequent words
+                            if resp.drag_started() && active_color.is_some() {
+                                start_drag = true;
+                            }
+
+                            // Apply mark on click OR when hovered while dragging with mouse held
+                            let should_apply = resp.clicked()
+                                || (resp.hovered() && mouse_down && (drag_active || start_drag) && active_color.is_some());
+
+                            if should_apply {
                                 if let Some(color) = active_color {
-                                    // Toggle: if already this color → clear, else set
                                     if word_color.map(|c| c.as_str()) == Some(color) {
-                                        clear_word = Some((
+                                        // Toggle off
+                                        clear_words.push((
                                             verse.book_name.clone(),
                                             verse.chapter,
                                             verse.verse,
@@ -864,7 +894,7 @@ impl BibleDeskApp {
                                             widx,
                                         ));
                                     } else {
-                                        set_word = Some((
+                                        set_words.push((
                                             verse.book_name.clone(),
                                             verse.chapter,
                                             verse.verse,
@@ -881,6 +911,11 @@ impl BibleDeskApp {
                     ui.add_space(6.0);
                 }
             });
+
+            // Persist drag state
+            if start_drag {
+                self.marker_drag_active = true;
+            }
 
             // Apply deferred actions
             if let Some(v) = save_verse {
@@ -907,12 +942,15 @@ impl BibleDeskApp {
                 );
                 self.reload_marks();
             }
-            if let Some((bn, ch, v, tr, wi, color)) = set_word {
-                let _ = self.db.lock().unwrap().set_word_mark(&bn, ch, v, &tr, wi, color);
-                self.reload_word_marks();
-            }
-            if let Some((bn, ch, v, tr, wi)) = clear_word {
-                let _ = self.db.lock().unwrap().clear_word_mark(&bn, ch, v, &tr, wi);
+            if !set_words.is_empty() || !clear_words.is_empty() {
+                let db = self.db.lock().unwrap();
+                for (bn, ch, v, tr, wi, color) in &set_words {
+                    let _ = db.set_word_mark(bn, *ch, *v, tr, *wi, color);
+                }
+                for (bn, ch, v, tr, wi) in &clear_words {
+                    let _ = db.clear_word_mark(bn, *ch, *v, tr, *wi);
+                }
+                drop(db);
                 self.reload_word_marks();
             }
         } else if self.chapter_loading {
