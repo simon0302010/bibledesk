@@ -46,6 +46,7 @@ struct BookEntry {
 
 // ── Chapter content ───────────────────────────────────────────────────────────
 
+/// The getbible.net v2 chapter endpoint returns verses as a JSON array.
 #[derive(Debug, Deserialize)]
 struct ChapterContent {
     #[serde(default)]
@@ -56,13 +57,31 @@ struct ChapterContent {
     chapter_nr: u32,
     #[serde(default)]
     abbreviation: String,
-    verses: HashMap<String, VerseEntry>,
+    /// Verses are returned as an array, not a map.
+    verses: Vec<VerseEntry>,
 }
 
 #[derive(Debug, Deserialize)]
 struct VerseEntry {
     verse: u32,
     text: String,
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Parse a JSON body, printing the full body to stderr on failure (for debugging),
+/// and returning a truncated preview in the user-facing error string.
+fn parse_body<T: serde::de::DeserializeOwned>(body: &str, context: &str) -> Result<T, String> {
+    serde_json::from_str(body).map_err(|e| {
+        // Print full body to stderr for untruncated debugging
+        eprintln!("[BibleDesk] {} parse error: {}\nFull response body:\n{}", context, e, body);
+        let preview = if body.len() > 300 {
+            format!("{}...", &body[..300])
+        } else {
+            body.to_string()
+        };
+        format!("Parse error: {} (response preview: {})", e, preview)
+    })
 }
 
 // ── Public client ─────────────────────────────────────────────────────────────
@@ -78,21 +97,10 @@ impl BibleClient {
         if !resp.status().is_success() {
             return Err(format!("API error {}", resp.status()));
         }
-
-        // Get response text for better error reporting
         let body = resp.text()
             .map_err(|e| format!("Failed to read response body: {}", e))?;
 
-        // Try parsing as HashMap (expected format)
-        let raw: HashMap<String, TranslationEntry> = serde_json::from_str(&body)
-            .map_err(|e| {
-                let preview = if body.len() > 200 {
-                    format!("{}...", &body[..200])
-                } else {
-                    body.clone()
-                };
-                format!("Parse error: {} (response preview: {})", e, preview)
-            })?;
+        let raw: HashMap<String, TranslationEntry> = parse_body(&body, "translations.json")?;
 
         let mut list: Vec<Translation> = raw
             .into_values()
@@ -110,21 +118,10 @@ impl BibleClient {
         if !resp.status().is_success() {
             return Err(format!("API error {}", resp.status()));
         }
-
-        // Get response text for better error reporting
         let body = resp.text()
             .map_err(|e| format!("Failed to read response body: {}", e))?;
 
-        // Try parsing as HashMap (expected format)
-        let raw: HashMap<String, BookEntry> = serde_json::from_str(&body)
-            .map_err(|e| {
-                let preview = if body.len() > 200 {
-                    format!("{}...", &body[..200])
-                } else {
-                    body.clone()
-                };
-                format!("Parse error: {} (response preview: {})", e, preview)
-            })?;
+        let raw: HashMap<String, BookEntry> = parse_body(&body, &format!("{}/books.json", abbr))?;
 
         let mut books: Vec<BibleBook> = raw
             .into_values()
@@ -147,21 +144,13 @@ impl BibleClient {
         if !resp.status().is_success() {
             return Err(format!("API error {}", resp.status()));
         }
-
-        // Get response text for better error reporting
         let body = resp.text()
             .map_err(|e| format!("Failed to read response body: {}", e))?;
 
-        // Try parsing as ChapterContent (expected format)
-        let content: ChapterContent = serde_json::from_str(&body)
-            .map_err(|e| {
-                let preview = if body.len() > 200 {
-                    format!("{}...", &body[..200])
-                } else {
-                    body.clone()
-                };
-                format!("Parse error: {} (response preview: {})", e, preview)
-            })?;
+        let content: ChapterContent = parse_body(
+            &body,
+            &format!("{}/{}/{}.json", abbr, book_nr, chapter_nr),
+        )?;
 
         let book_id = content.book_nr.to_string();
         let book_name = content.book_name.clone();
@@ -170,7 +159,7 @@ impl BibleClient {
 
         let mut verses: Vec<Verse> = content
             .verses
-            .into_values()
+            .into_iter()
             .map(|v| Verse {
                 book_id: book_id.clone(),
                 book_name: book_name.clone(),
@@ -191,3 +180,4 @@ impl BibleClient {
         })
     }
 }
+
