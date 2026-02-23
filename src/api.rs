@@ -26,21 +26,35 @@ struct TranslationEntry {
 
 // ── Book list ─────────────────────────────────────────────────────────────────
 
+/// Each entry in `/{abbr}/books.json` — field names as returned by getbible.net v2.
+/// The response also echoes back translation metadata per entry, which we ignore.
 #[derive(Debug, Deserialize)]
 struct BookEntry {
-    book_nr: u32,
-    book_name: String,
+    /// Book number (1-based)
+    nr: u32,
+    /// Book name (e.g. "Genesis")
+    name: String,
     /// Total number of chapters in this book
-    chapter_nr: u32,
+    #[serde(default)]
+    chapters: u32,
+    // Translation metadata fields echoed back — ignored but must be tolerated
+    #[serde(default)]
+    translation: String,
+    #[serde(default)]
+    abbreviation: String,
 }
 
 // ── Chapter content ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct ChapterContent {
+    #[serde(default)]
     book_nr: u32,
+    #[serde(default)]
     book_name: String,
+    #[serde(default)]
     chapter_nr: u32,
+    #[serde(default)]
     abbreviation: String,
     verses: HashMap<String, VerseEntry>,
 }
@@ -115,10 +129,10 @@ impl BibleClient {
         let mut books: Vec<BibleBook> = raw
             .into_values()
             .map(|b| BibleBook {
-                id: b.book_nr.to_string(),
-                book_nr: b.book_nr,
-                name: b.book_name,
-                chapters: b.chapter_nr,
+                id: b.nr.to_string(),
+                book_nr: b.nr,
+                name: b.name,
+                chapters: b.chapters,
             })
             .collect();
         books.sort_by_key(|b| b.book_nr);
