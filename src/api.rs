@@ -9,6 +9,19 @@ const BASE_URL: &str = "https://api.getbible.net/v2";
 #[derive(Debug, Deserialize)]
 struct TranslationEntry {
     translation: String,
+    abbreviation: String,
+    #[serde(default)]
+    lang: String,
+    #[serde(default)]
+    language: String,
+    #[serde(default)]
+    direction: String,
+    #[serde(default)]
+    encoding: String,
+    #[serde(default)]
+    nr: u32,
+    #[serde(default)]
+    name: String,
 }
 
 // ── Book list ─────────────────────────────────────────────────────────────────
@@ -68,8 +81,8 @@ impl BibleClient {
             })?;
 
         let mut list: Vec<Translation> = raw
-            .into_iter()
-            .map(|(abbr, entry)| Translation { id: abbr, name: entry.translation })
+            .into_values()
+            .map(|entry| Translation { id: entry.abbreviation, name: entry.translation })
             .collect();
         list.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(list)
